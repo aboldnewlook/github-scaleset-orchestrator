@@ -1,6 +1,8 @@
 services:
-  selfrunner:
-    build: .
+  gso:
+    image: ghcr.io/aboldnewlook/github-scaleset-orchestrator:latest
+    # For local builds, comment out image and uncomment build:
+    # build: .
     environment:
       - GITHUB_TOKEN=${GITHUB_TOKEN}
     volumes:
