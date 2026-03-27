@@ -1,0 +1,18 @@
+services:
+  selfrunner:
+    build: .
+    environment:
+      - GITHUB_TOKEN=${GITHUB_TOKEN}
+    volumes:
+      - ./config.yaml:/etc/gso/config.yaml:ro
+    restart: unless-stopped
+    # Uncomment to use Docker secrets instead of env vars:
+    # secrets:
+    #   - gh_token
+    # In config.yaml, set:
+    #   auth:
+    #     token_file: /run/secrets/gh_token
+
+# secrets:
+#   gh_token:
+#     file: ./gh_token.txt

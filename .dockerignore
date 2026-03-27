@@ -1,0 +1,8 @@
+gso
+*.env
+config.yaml
+.git
+.claude
+.gitignore
+*.md
+docs/

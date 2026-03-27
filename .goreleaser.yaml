@@ -1,0 +1,55 @@
+version: 2
+
+builds:
+  - binary: gso
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+
+archives:
+  - format: tar.gz
+    files:
+      - README.md
+      - config.example.yaml
+
+dockers:
+  - image_templates:
+      - "ghcr.io/aboldnewlook/github-scaleset-orchestrator:{{ .Version }}-amd64"
+    dockerfile: Dockerfile
+    use: buildx
+    build_flag_templates:
+      - "--platform=linux/amd64"
+    goarch: amd64
+
+  - image_templates:
+      - "ghcr.io/aboldnewlook/github-scaleset-orchestrator:{{ .Version }}-arm64"
+    dockerfile: Dockerfile
+    use: buildx
+    build_flag_templates:
+      - "--platform=linux/arm64"
+    goarch: arm64
+
+docker_manifests:
+  - name_template: "ghcr.io/aboldnewlook/github-scaleset-orchestrator:{{ .Version }}"
+    image_templates:
+      - "ghcr.io/aboldnewlook/github-scaleset-orchestrator:{{ .Version }}-amd64"
+      - "ghcr.io/aboldnewlook/github-scaleset-orchestrator:{{ .Version }}-arm64"
+  - name_template: "ghcr.io/aboldnewlook/github-scaleset-orchestrator:latest"
+    image_templates:
+      - "ghcr.io/aboldnewlook/github-scaleset-orchestrator:{{ .Version }}-amd64"
+      - "ghcr.io/aboldnewlook/github-scaleset-orchestrator:{{ .Version }}-arm64"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
