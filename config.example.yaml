@@ -26,3 +26,8 @@ repos:
   - name: owner/repo-c
     token:
       token_keychain: repo-c
+
+  # Repos under a different account/org can use a separate token
+  - name: other-owner/repo-d
+    token:
+      token_env: OTHER_OWNER_TOKEN

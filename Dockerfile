@@ -20,7 +20,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Download and extract the latest Linux x64 runner binary
 # Use the releases API tag endpoint to get the version, then construct the URL directly
 RUN set -eux; \
-    VERSION=$(curl -fsSL -o /dev/null -w '%{redirect_url}' https://github.com/actions/runner/releases/latest | grep -oP '[^/v]+$'); \
+    VERSION=$(curl -fsSL -o /dev/null -w '%{redirect_url}' https://github.com/actions/runner/releases/latest | sed 's|.*/v||'); \
     URL="https://github.com/actions/runner/releases/download/v${VERSION}/actions-runner-linux-x64-${VERSION}.tar.gz"; \
     mkdir -p "/opt/runner-cache/gso/runner-${VERSION}"; \
     curl -fsSL "$URL" | tar xz -C "/opt/runner-cache/gso/runner-${VERSION}"; \
