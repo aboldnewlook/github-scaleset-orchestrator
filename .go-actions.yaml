@@ -1,0 +1,25 @@
+version: 1
+ci:
+    go:
+        version-file: go.mod
+    test:
+        enabled: true
+        args: -v -race ./...
+        coverage:
+            enabled: true
+            threshold: 80
+    lint:
+        enabled: true
+        version: v2.0.2
+        args: run ./...
+    benchmark:
+        args: -bench=. -benchmem
+        count: 5
+    security:
+        enabled: true
+        version: latest
+        args: ./...
+        fail-on: high
+output:
+    format: auto
+    verbosity: normal

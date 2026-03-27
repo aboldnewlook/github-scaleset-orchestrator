@@ -1,0 +1,12 @@
+version: "3"
+
+tasks:
+  lint:
+    desc: Run linter via go-actions
+    cmds:
+      - go-actions check lint
+
+  test:
+    desc: Run tests via go-actions
+    cmds:
+      - go-actions check test
