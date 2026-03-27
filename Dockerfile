@@ -18,8 +18,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Download and extract the latest Linux x64 runner binary
+# Pipe through tr to strip control characters that break jq
 RUN set -eux; \
-    RELEASE=$(curl -fsSL https://api.github.com/repos/actions/runner/releases/latest); \
+    RELEASE=$(curl -fsSL https://api.github.com/repos/actions/runner/releases/latest | tr -d '\000-\011\013-\037'); \
     VERSION=$(echo "$RELEASE" | jq -r '.tag_name' | sed 's/^v//'); \
     URL=$(echo "$RELEASE" | jq -r '.assets[] | select(.name | test("actions-runner-linux-x64-.*\\.tar\\.gz$")) | .browser_download_url'); \
     mkdir -p "/opt/runner-cache/gso/runner-${VERSION}"; \
