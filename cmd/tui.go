@@ -28,7 +28,7 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("cannot connect to daemon: %w\nStart the daemon first with: gso start", err)
 	}
-	client.Close()
+	_ = client.Close()
 
 	// Set up event store for reading history
 	cacheDir, err := os.UserCacheDir()

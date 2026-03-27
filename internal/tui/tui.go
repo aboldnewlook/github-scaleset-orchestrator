@@ -135,7 +135,7 @@ func (m *Model) refreshLiveStatus() {
 		m.liveStatus = nil
 		return
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	result, err := client.Call(context.Background(), control.MethodLiveStatus, nil)
 	if err != nil {
@@ -232,10 +232,7 @@ func (m Model) View() string {
 	}
 
 	frameW := m.width - 2
-	innerW := frameW - 2
-	if innerW < 20 {
-		innerW = 20
-	}
+	innerW := max(frameW-2, 20)
 
 	header := m.renderHeader(innerW)
 	headerSep := dividerStyle.Render(strings.Repeat("─", innerW))
@@ -244,10 +241,7 @@ func (m Model) View() string {
 	rightW := innerW - leftW - 1
 
 	headerLines := lipgloss.Height(header)
-	contentH := m.height - headerLines - 1 - 1 - 1 - 2
-	if contentH < 4 {
-		contentH = 4
-	}
+	contentH := max(m.height-headerLines-1-1-1-2, 4)
 
 	leftPanel := m.renderLeftPanel(leftW, contentH)
 	rightPanel := m.renderRightPanel(rightW, contentH)
@@ -318,9 +312,7 @@ func (m Model) renderCapacityBar(used, total int) string {
 		total = 1
 	}
 	filled := used * barWidth / total
-	if filled > barWidth {
-		filled = barWidth
-	}
+	filled = min(filled, barWidth)
 	empty := barWidth - filled
 
 	bar := capacityUsedStyle.Render(strings.Repeat("▮", filled)) +
@@ -408,9 +400,7 @@ func (m Model) renderRepoTable(w int) string {
 	colQueued := 2
 	// 3 single-space gaps between 4 columns
 	colRepo := w - colRunners - colJobs - colQueued - 3
-	if colRepo < 10 {
-		colRepo = 10
-	}
+	colRepo = max(colRepo, 10)
 
 	header := tableHeaderStyle.Render(
 		padRight("REPO", colRepo) + " " +
@@ -499,9 +489,7 @@ func (m Model) renderRightPanel(w, h int) string {
 	header := " " + eventHeaderStyle.Render("Events")
 
 	maxLines := h - 1
-	if maxLines < 1 {
-		maxLines = 1
-	}
+	maxLines = max(maxLines, 1)
 
 	startIdx := 0
 	if len(m.events) > maxLines {
@@ -538,11 +526,6 @@ func (m Model) renderRightPanel(w, h int) string {
 func (m Model) renderEventLine(e event.Event, w int) string {
 	ts := e.Time.Format("15:04:05")
 
-	typeStr := string(e.Type)
-	if len(typeStr) > 16 {
-		typeStr = typeStr[:16]
-	}
-
 	repo := ""
 	if e.Repo != "" {
 		repo = repoShortName(e.Repo)
@@ -553,9 +536,7 @@ func (m Model) renderEventLine(e event.Event, w int) string {
 
 	payload := summarizePayload(e)
 	payloadMax := w - 43
-	if payloadMax < 0 {
-		payloadMax = 0
-	}
+	payloadMax = max(payloadMax, 0)
 	payload = truncate(payload, payloadMax)
 
 	return fmt.Sprintf(" %s  %-16s  %-12s  %s",
@@ -587,14 +568,14 @@ func isSucceeded(e event.Event) bool {
 }
 
 // renderHelpBar renders the bottom help bar.
-func (m Model) renderHelpBar(w int) string {
+func (m Model) renderHelpBar(_ int) string {
 	return helpBarStyle.Render(
 		" " + helpKeyStyle.Render("q") + ": quit  " +
 			helpKeyStyle.Render("?") + ": help")
 }
 
 // renderHelp renders the expanded help overlay.
-func (m Model) renderHelp(w int) string {
+func (m Model) renderHelp(_ int) string {
 	lines := []string{
 		"",
 		" " + helpKeyStyle.Render("q") + "       quit the TUI (daemon keeps running)",
@@ -639,11 +620,7 @@ func (m Model) countQueuedJobs(repo string) int {
 				var d int
 				if _, err := fmt.Sscanf(desired, "%d", &d); err == nil {
 					active := m.countActiveJobs(repo)
-					queued := d - active
-					if queued < 0 {
-						queued = 0
-					}
-					return queued
+					return max(d-active, 0)
 				}
 			}
 		}

@@ -261,7 +261,7 @@ func (o *Orchestrator) runRepo(ctx context.Context, repo config.Repo, hostname s
 			return fmt.Errorf("creating session client: %w", err)
 		}
 	}
-	defer sessionClient.Close(ctx)
+	defer func() { _ = sessionClient.Close(ctx) }()
 
 	s := scaler.New(repo.Name, ss.ID, client, worker, sem, logger, o.bus)
 

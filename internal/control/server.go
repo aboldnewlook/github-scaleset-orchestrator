@@ -59,7 +59,7 @@ func (s *Server) Start(ctx context.Context) error {
 	go func() {
 		select {
 		case <-ctx.Done():
-			ln.Close()
+			_ = ln.Close()
 		case <-s.done:
 		}
 	}()
@@ -126,12 +126,12 @@ func (s *Server) checkStaleSocket() error {
 		s.logger.Info("removing stale socket", "socket", s.socketPath)
 		return os.Remove(s.socketPath)
 	}
-	conn.Close()
+	_ = conn.Close()
 	return fmt.Errorf("another instance is already running (socket %s is active)", s.socketPath)
 }
 
 func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	dec := json.NewDecoder(conn)
 	enc := json.NewEncoder(conn)

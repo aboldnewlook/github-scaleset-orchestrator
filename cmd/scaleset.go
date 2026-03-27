@@ -93,8 +93,7 @@ func runScalesetList(cmd *cobra.Command, args []string) error {
 			jobs,
 		})
 	}
-	printTable(headers, rows)
-	return nil
+	return printTable(headers, rows)
 }
 
 func runScalesetInspect(cmd *cobra.Command, args []string) error {

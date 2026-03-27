@@ -23,7 +23,7 @@ func runStop(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("%w (is the daemon running?)", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	_, err = client.Call(context.Background(), control.MethodShutdown, nil)
 	if err != nil {

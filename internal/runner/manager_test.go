@@ -116,7 +116,7 @@ func TestVerifyCached(t *testing.T) {
 					t.Fatal(err)
 				}
 			} else {
-				os.Remove(checksumFile)
+				_ = os.Remove(checksumFile)
 			}
 
 			got := mgr.verifyCached(versionDir, checksumFile, tt.expectedChecksum)
@@ -195,13 +195,13 @@ func TestLatestRelease(t *testing.T) {
 
 	// Mock the release endpoint
 	releaseServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(release)
+		_ = json.NewEncoder(w).Encode(release)
 	}))
 	defer releaseServer.Close()
 
 	// Mock the checksum endpoint
 	checksumServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, "abcdef123456  %s\n", tarballName)
+		_, _ = fmt.Fprintf(w, "abcdef123456  %s\n", tarballName)
 	}))
 	defer checksumServer.Close()
 
@@ -212,7 +212,7 @@ func TestLatestRelease(t *testing.T) {
 	// Re-create the release server with updated URLs
 	releaseServer.Close()
 	releaseServer = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(release)
+		_ = json.NewEncoder(w).Encode(release)
 	}))
 	defer releaseServer.Close()
 
@@ -276,7 +276,7 @@ func TestLatestRelease_NoMatchingAsset(t *testing.T) {
 	}
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(release)
+		_ = json.NewEncoder(w).Encode(release)
 	}))
 	defer server.Close()
 
@@ -318,7 +318,7 @@ func TestLatestRelease_NoMatchingAsset(t *testing.T) {
 
 func TestLatestRelease_BadJSON(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("{bad json"))
+		_, _ = w.Write([]byte("{bad json"))
 	}))
 	defer server.Close()
 
@@ -486,7 +486,7 @@ func TestFetchChecksum(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(tt.status)
-				w.Write([]byte(tt.body))
+				_, _ = w.Write([]byte(tt.body))
 			}))
 			defer server.Close()
 
@@ -514,7 +514,7 @@ func TestDownload_ChecksumMismatch(t *testing.T) {
 	// Serve a tarball (just some bytes — we expect checksum mismatch before extraction)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Length", "11")
-		w.Write([]byte("hello world"))
+		_, _ = w.Write([]byte("hello world"))
 	}))
 	defer server.Close()
 

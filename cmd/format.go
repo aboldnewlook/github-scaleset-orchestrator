@@ -8,11 +8,11 @@ import (
 )
 
 // printTable prints aligned tabular output using tabwriter.
-func printTable(headers []string, rows [][]string) {
+func printTable(headers []string, rows [][]string) error {
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, strings.Join(headers, "\t"))
+	_, _ = fmt.Fprintln(w, strings.Join(headers, "\t"))
 	for _, row := range rows {
-		fmt.Fprintln(w, strings.Join(row, "\t"))
+		_, _ = fmt.Fprintln(w, strings.Join(row, "\t"))
 	}
-	w.Flush()
+	return w.Flush()
 }

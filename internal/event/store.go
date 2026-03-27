@@ -28,7 +28,7 @@ func NewFileStore(path string) *FileStore {
 }
 
 // Append writes a single event as one JSON line.
-func (s *FileStore) Append(e Event) error {
+func (s *FileStore) Append(e Event) (err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -36,7 +36,11 @@ func (s *FileStore) Append(e Event) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() {
+		if cerr := f.Close(); err == nil {
+			err = cerr
+		}
+	}()
 
 	data, err := json.Marshal(e)
 	if err != nil {
@@ -60,7 +64,7 @@ func (s *FileStore) Query(filter StoreFilter) ([]Event, error) {
 		}
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	var results []Event
 	scanner := bufio.NewScanner(f)

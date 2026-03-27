@@ -51,7 +51,9 @@ func runStart(cmd *cobra.Command, args []string) error {
 		cacheDir = "/tmp"
 	}
 	eventsDir := filepath.Join(cacheDir, "gso")
-	os.MkdirAll(eventsDir, 0o755)
+	if err := os.MkdirAll(eventsDir, 0o755); err != nil {
+		return fmt.Errorf("creating events directory: %w", err)
+	}
 	store := event.NewFileStore(filepath.Join(eventsDir, "events.jsonl"))
 	bus := event.NewBus(store)
 
@@ -67,7 +69,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 			logger.Error("control server error", "error", err)
 		}
 	}()
-	defer ctrlServer.Stop()
+	defer func() { _ = ctrlServer.Stop() }()
 
 	if err := orch.Run(ctx); err != nil {
 		if ctx.Err() != nil {

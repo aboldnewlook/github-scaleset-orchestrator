@@ -28,7 +28,7 @@ func (w *Worker) Run(ctx context.Context, name string, jitConfig string) error {
 	if err != nil {
 		return fmt.Errorf("creating work dir: %w", err)
 	}
-	defer os.RemoveAll(workDir)
+	defer func() { _ = os.RemoveAll(workDir) }()
 
 	w.logger.Info("preparing runner", "name", name, "workdir", workDir)
 
@@ -100,13 +100,13 @@ func copyFile(src, dst string, mode os.FileMode) error {
 	if err != nil {
 		return err
 	}
-	defer in.Close()
+	defer func() { _ = in.Close() }()
 
 	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
 	if err != nil {
 		return err
 	}
-	defer out.Close()
+	defer func() { _ = out.Close() }()
 
 	_, err = out.ReadFrom(in)
 	return err

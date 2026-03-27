@@ -58,13 +58,12 @@ func runRunnerList(cmd *cobra.Command, args []string) error {
 	// Try live status from daemon first
 	client, err := control.NewClient()
 	if err == nil {
-		defer client.Close()
+		defer func() { _ = client.Close() }()
 		result, err := client.Call(context.Background(), control.MethodLiveStatus, nil)
 		if err == nil {
 			var live control.LiveStatusResult
 			if json.Unmarshal(result, &live) == nil {
-				printLiveRunners(&live, runnerListRepo)
-				return nil
+				return printLiveRunners(&live, runnerListRepo)
 			}
 		}
 	}
@@ -102,11 +101,10 @@ func runRunnerList(cmd *cobra.Command, args []string) error {
 			fmt.Sprintf("%d", s.TotalIdleRunners),
 		})
 	}
-	printTable(headers, rows)
-	return nil
+	return printTable(headers, rows)
 }
 
-func printLiveRunners(live *control.LiveStatusResult, repoFilter string) {
+func printLiveRunners(live *control.LiveStatusResult, repoFilter string) error {
 	headers := []string{"REPO", "RUNNER"}
 	var rows [][]string
 	for _, r := range live.Repos {
@@ -121,7 +119,7 @@ func printLiveRunners(live *control.LiveStatusResult, repoFilter string) {
 			rows = append(rows, []string{r.Repo, name})
 		}
 	}
-	printTable(headers, rows)
+	return printTable(headers, rows)
 }
 
 func runRunnerRecycle(cmd *cobra.Command, args []string) error {
@@ -131,7 +129,7 @@ func runRunnerRecycle(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("%w (is the daemon running?)", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	_, err = client.Call(context.Background(), control.MethodRecycleRunner, control.RecycleRunnerParams{
 		Name: name,

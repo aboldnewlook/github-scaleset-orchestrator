@@ -34,8 +34,7 @@ func TestServerStartStop(t *testing.T) {
 	sock := tempSocketPath(t)
 	srv := control.NewServer(sock, &echoHandler{}, testLogger())
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -70,8 +69,7 @@ func TestServerRequestResponse(t *testing.T) {
 	sock := tempSocketPath(t)
 	srv := control.NewServer(sock, &echoHandler{}, testLogger())
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	go srv.Start(ctx) //nolint:errcheck
 	defer srv.Stop()  //nolint:errcheck
@@ -83,7 +81,7 @@ func TestServerRequestResponse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial failed: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	req := control.Request{Method: control.MethodLiveStatus}
 	if err := json.NewEncoder(conn).Encode(req); err != nil {
@@ -118,8 +116,7 @@ func TestServerStaleSocketRemoval(t *testing.T) {
 
 	srv := control.NewServer(sock, &echoHandler{}, testLogger())
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -134,7 +131,7 @@ func TestServerStaleSocketRemoval(t *testing.T) {
 	if err != nil {
 		t.Fatalf("should be able to connect after stale socket removal: %v", err)
 	}
-	conn.Close()
+	_ = conn.Close()
 
 	srv.Stop() //nolint:errcheck
 }
@@ -144,8 +141,7 @@ func TestServerAlreadyRunning(t *testing.T) {
 
 	// Start a first server.
 	srv1 := control.NewServer(sock, &echoHandler{}, testLogger())
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	go srv1.Start(ctx) //nolint:errcheck
 	defer srv1.Stop()  //nolint:errcheck
@@ -193,8 +189,7 @@ func TestServerInvalidJSON(t *testing.T) {
 	sock := tempSocketPath(t)
 	srv := control.NewServer(sock, &echoHandler{}, testLogger())
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	go srv.Start(ctx) //nolint:errcheck
 	defer srv.Stop()  //nolint:errcheck
@@ -205,7 +200,7 @@ func TestServerInvalidJSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial failed: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// Send invalid JSON.
 	conn.Write([]byte("not json\n")) //nolint:errcheck

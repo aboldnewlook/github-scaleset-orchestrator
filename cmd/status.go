@@ -30,13 +30,12 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	// Try live status from daemon first
 	client, err := control.NewClient()
 	if err == nil {
-		defer client.Close()
+		defer func() { _ = client.Close() }()
 		result, err := client.Call(context.Background(), control.MethodLiveStatus, nil)
 		if err == nil {
 			var live control.LiveStatusResult
 			if json.Unmarshal(result, &live) == nil {
-				printLiveStatus(&live)
-				return nil
+				return printLiveStatus(&live)
 			}
 		}
 	}
@@ -55,11 +54,10 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("querying status: %w", err)
 	}
 
-	printAPIStatus(status)
-	return nil
+	return printAPIStatus(status)
 }
 
-func printLiveStatus(live *control.LiveStatusResult) {
+func printLiveStatus(live *control.LiveStatusResult) error {
 	fmt.Printf("Daemon running (max %d runners, %d available)\n\n", live.MaxRunners, live.Available)
 
 	headers := []string{"REPO", "ACTIVE RUNNERS"}
@@ -70,10 +68,10 @@ func printLiveStatus(live *control.LiveStatusResult) {
 			fmt.Sprintf("%d", len(r.Runners)),
 		})
 	}
-	printTable(headers, rows)
+	return printTable(headers, rows)
 }
 
-func printAPIStatus(status *service.StatusResult) {
+func printAPIStatus(status *service.StatusResult) error {
 	fmt.Printf("Daemon not running (querying API, max %d runners)\n\n", status.MaxRunners)
 
 	headers := []string{"REPO", "SCALE SET", "RUNNING", "ASSIGNED", "REGISTERED"}
@@ -96,5 +94,5 @@ func printAPIStatus(status *service.StatusResult) {
 			fmt.Sprintf("%d", s.TotalRegisteredRunners),
 		})
 	}
-	printTable(headers, rows)
+	return printTable(headers, rows)
 }

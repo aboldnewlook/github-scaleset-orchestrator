@@ -87,7 +87,7 @@ func (m *Manager) download(ctx context.Context, release *runnerRelease, dest, ch
 	if err != nil {
 		return fmt.Errorf("downloading runner tarball: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("unexpected status downloading runner: %d", resp.StatusCode)
@@ -97,8 +97,8 @@ func (m *Manager) download(ctx context.Context, release *runnerRelease, dest, ch
 	if err != nil {
 		return err
 	}
-	defer os.Remove(tmpFile.Name())
-	defer tmpFile.Close()
+	defer func() { _ = os.Remove(tmpFile.Name()) }()
+	defer func() { _ = tmpFile.Close() }()
 
 	// Download with progress logging and checksum
 	hasher := sha256.New()
@@ -117,7 +117,9 @@ func (m *Manager) download(ctx context.Context, release *runnerRelease, dest, ch
 		return fmt.Errorf("writing runner tarball: %w", err)
 	}
 	pr.logFinal()
-	tmpFile.Close()
+	if err := tmpFile.Close(); err != nil {
+		return fmt.Errorf("closing temp file: %w", err)
+	}
 
 	// Verify checksum if available
 	actualChecksum := hex.EncodeToString(hasher.Sum(nil))
@@ -126,7 +128,7 @@ func (m *Manager) download(ctx context.Context, release *runnerRelease, dest, ch
 	}
 
 	// Clean up old version if exists, then extract
-	os.RemoveAll(dest)
+	_ = os.RemoveAll(dest)
 	if err := os.MkdirAll(dest, 0o755); err != nil {
 		return err
 	}
@@ -219,7 +221,7 @@ func (m *Manager) latestRelease(ctx context.Context) (*runnerRelease, error) {
 	if err != nil {
 		return nil, fmt.Errorf("fetching latest runner release: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("unexpected status fetching runner release: %d", resp.StatusCode)
@@ -286,7 +288,7 @@ func (m *Manager) fetchChecksum(ctx context.Context, url string) (string, error)
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("unexpected status: %d", resp.StatusCode)

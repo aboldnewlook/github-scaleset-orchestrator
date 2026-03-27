@@ -13,8 +13,7 @@ func TestClientCall(t *testing.T) {
 	sock := tempSocketPath(t)
 	srv := control.NewServer(sock, &echoHandler{}, testLogger())
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	go srv.Start(ctx) //nolint:errcheck
 	defer srv.Stop()  //nolint:errcheck
@@ -25,7 +24,7 @@ func TestClientCall(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect failed: %v", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	result, err := client.Call(ctx, control.MethodLiveStatus, nil)
 	if err != nil {
@@ -45,8 +44,7 @@ func TestClientCallWithParams(t *testing.T) {
 	sock := tempSocketPath(t)
 	srv := control.NewServer(sock, &echoHandler{}, testLogger())
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	go srv.Start(ctx) //nolint:errcheck
 	defer srv.Stop()  //nolint:errcheck
@@ -57,7 +55,7 @@ func TestClientCallWithParams(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect failed: %v", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	params := control.RecycleRunnerParams{Name: "test-runner"}
 	result, err := client.Call(ctx, control.MethodRecycleRunner, params)
@@ -97,8 +95,7 @@ func TestClientServerError(t *testing.T) {
 	sock := tempSocketPath(t)
 	srv := control.NewServer(sock, &errorHandler{}, testLogger())
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	go srv.Start(ctx) //nolint:errcheck
 	defer srv.Stop()  //nolint:errcheck
@@ -109,7 +106,7 @@ func TestClientServerError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect failed: %v", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	_, err = client.Call(ctx, control.MethodLiveStatus, nil)
 	if err == nil {

@@ -37,7 +37,9 @@ func runTokenSet(cmd *cobra.Command, args []string) error {
 
 	fmt.Print("Enter token: ")
 	var token string
-	fmt.Scanln(&token)
+	if _, err := fmt.Scanln(&token); err != nil {
+		return fmt.Errorf("reading token: %w", err)
+	}
 	if token == "" {
 		return fmt.Errorf("token cannot be empty")
 	}
