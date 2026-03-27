@@ -18,11 +18,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Download and extract the latest Linux x64 runner binary
-# Pipe through tr to strip control characters that break jq
+# Use the releases API tag endpoint to get the version, then construct the URL directly
 RUN set -eux; \
-    RELEASE=$(curl -fsSL https://api.github.com/repos/actions/runner/releases/latest | tr -d '\000-\011\013-\037'); \
-    VERSION=$(echo "$RELEASE" | jq -r '.tag_name' | sed 's/^v//'); \
-    URL=$(echo "$RELEASE" | jq -r '.assets[] | select(.name | test("actions-runner-linux-x64-.*\\.tar\\.gz$")) | .browser_download_url'); \
+    VERSION=$(curl -fsSL -o /dev/null -w '%{redirect_url}' https://github.com/actions/runner/releases/latest | grep -oP '[^/v]+$'); \
+    URL="https://github.com/actions/runner/releases/download/v${VERSION}/actions-runner-linux-x64-${VERSION}.tar.gz"; \
     mkdir -p "/opt/runner-cache/gso/runner-${VERSION}"; \
     curl -fsSL "$URL" | tar xz -C "/opt/runner-cache/gso/runner-${VERSION}"; \
     echo "Runner ${VERSION} extracted successfully"
