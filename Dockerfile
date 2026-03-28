@@ -47,7 +47,8 @@ RUN mkdir -p /etc/gso \
     && mkdir -p /opt/gso/cache \
     && mkdir -p /home/runner/.cache \
     && chown -R runner:runner /home/runner \
-    && chown -R runner:runner /opt/gso
+    && chown -R runner:runner /opt/gso \
+    && chown -R runner:runner /etc/gso
 
 # Copy the Go binary from builder
 COPY --from=builder /out/gso /usr/local/bin/gso
