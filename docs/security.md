@@ -42,16 +42,16 @@ At the organization level, GitHub offers `organization_self_hosted_runners:write
 
 Tokens can be stored in three locations, resolved in priority order:
 
-1. **Environment variable** (`token_env`): The token value is read from the named env var at startup. Suitable for CI environments and Docker containers. The token exists in process memory and the environment.
+1. **Environment variable** (`env`): The token value is read from the named env var at startup. Suitable for CI environments and Docker containers. The token exists in process memory and the environment.
 
-2. **OS keychain** (`token_keychain`): The token is stored in the platform's secure credential store:
+2. **OS keychain** (`keychain`): The token is stored in the platform's secure credential store:
    - **macOS**: Keychain Services (encrypted, protected by login password or Touch ID)
    - **Linux**: GNOME Keyring or KWallet (encrypted, session-scoped)
    - **Windows**: Credential Manager (encrypted, protected by user login)
 
    The keychain is the recommended storage for interactive use. Tokens are encrypted at rest.
 
-3. **File** (`token_file`): The token is read from a file. Suitable for Docker secrets (`/run/secrets/...`), HashiCorp Vault agent, or other secret injection mechanisms. Ensure the file has restrictive permissions (`0600`).
+3. **File** (`file`): The token is read from a file. Suitable for Docker secrets (`/run/secrets/...`), HashiCorp Vault agent, or other secret injection mechanisms. Ensure the file has restrictive permissions (`0600`).
 
 ### Resolution
 
@@ -147,7 +147,7 @@ The orchestrator resolves DNS for the above hostnames. If you run in a restricte
 1. **Do not run the container as root.** Use a non-root user in your Dockerfile.
 2. **Use read-only root filesystem** with writable tmpfs mounts for `/tmp` and the cache directory.
 3. **Do not mount the Docker socket** into the container unless your workflows specifically need Docker-in-Docker.
-4. **Use Docker secrets** (`token_file: /run/secrets/gh_token`) instead of environment variables for token storage.
+4. **Use Docker secrets** (`file: /run/secrets/gh_token`) instead of environment variables for token storage.
 
 ## Comparison: Deployment Models
 
