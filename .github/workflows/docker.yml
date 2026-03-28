@@ -11,7 +11,7 @@ permissions:
 jobs:
   publish:
     name: Build and push image
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, unraid]
     steps:
       - uses: actions/checkout@v4
 

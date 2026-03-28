@@ -253,16 +253,9 @@ volumes:
   runner-cache:
 ```
 
-### Unraid
+### Unraid + Portainer
 
-Run as a Docker container. Mount your config file and set the `GITHUB_TOKEN` environment variable (or use a Docker secret with `token_file: /run/secrets/gh_token`).
-
-Key considerations for Docker/Linux:
-
-- The runner binary auto-detected for the container platform (linux/amd64 or linux/arm64)
-- Labels auto-include the detected OS ("Linux") and architecture
-- Use `token_file` with Docker secrets for production deployments
-- The runner cache volume avoids re-downloading the binary on restart
+See [docs/unraid-portainer.md](docs/unraid-portainer.md) for a complete deployment guide using Portainer stacks.
 
 ## How It Works
 
