@@ -64,5 +64,13 @@ ENV HOME=/home/runner
 USER runner
 WORKDIR /home/runner
 
-ENTRYPOINT ["gso"]
+COPY --chmod=755 <<'EOF' /usr/local/bin/docker-entrypoint.sh
+#!/bin/sh
+if [ -n "$GSO_CONFIG" ]; then
+  echo "$GSO_CONFIG" > /etc/gso/config.yaml
+fi
+exec gso "$@"
+EOF
+
+ENTRYPOINT ["docker-entrypoint.sh"]
 CMD ["start", "--config", "/etc/gso/config.yaml"]
