@@ -18,27 +18,45 @@ type Handler interface {
 
 // Server listens on a Unix domain socket and dispatches requests to a Handler.
 type Server struct {
-	socketPath string
-	handler    Handler
-	logger     *slog.Logger
-	listener   net.Listener
+	socketPath  string
+	handler     Handler
+	logger      *slog.Logger
+	listener    net.Listener
+	tcpAddr     string
+	tcpListener net.Listener
 
 	mu   sync.Mutex
 	done chan struct{}
 }
 
-// NewServer creates a new control server.
-func NewServer(socketPath string, handler Handler, logger *slog.Logger) *Server {
-	return &Server{
+// ServerOption configures optional Server behavior.
+type ServerOption func(*Server)
+
+// WithTCPAddr configures the server to also listen on a TCP address (e.g. ":9100").
+func WithTCPAddr(addr string) ServerOption {
+	return func(s *Server) {
+		s.tcpAddr = addr
+	}
+}
+
+// NewServer creates a new control server. Options are applied after the
+// server is created, so existing callers that pass only three arguments
+// continue to work unchanged.
+func NewServer(socketPath string, handler Handler, logger *slog.Logger, opts ...ServerOption) *Server {
+	s := &Server{
 		socketPath: socketPath,
 		handler:    handler,
 		logger:     logger,
 		done:       make(chan struct{}),
 	}
+	for _, o := range opts {
+		o(s)
+	}
+	return s
 }
 
-// Start begins listening on the Unix socket. It blocks until ctx is cancelled
-// or Stop is called.
+// Start begins listening on the Unix socket (and optionally TCP). It blocks
+// until ctx is cancelled or Stop is called.
 func (s *Server) Start(ctx context.Context) error {
 	if err := s.checkStaleSocket(); err != nil {
 		return err
@@ -64,32 +82,64 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 	}()
 
+	// Start TCP listener if configured.
+	if s.tcpAddr != "" {
+		tcpLn, err := net.Listen("tcp", s.tcpAddr)
+		if err != nil {
+			_ = ln.Close()
+			return fmt.Errorf("listening on TCP %s: %w", s.tcpAddr, err)
+		}
+
+		s.mu.Lock()
+		s.tcpListener = tcpLn
+		s.mu.Unlock()
+
+		s.logger.Info("control server listening", "tcp", tcpLn.Addr().String())
+
+		go func() {
+			select {
+			case <-ctx.Done():
+				_ = tcpLn.Close()
+			case <-s.done:
+			}
+		}()
+
+		go s.acceptLoop(ctx, tcpLn)
+	}
+
+	s.acceptLoop(ctx, ln)
+	return nil
+}
+
+// acceptLoop accepts connections on ln until the server is stopped or ctx is cancelled.
+func (s *Server) acceptLoop(ctx context.Context, ln net.Listener) {
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
 			// Check if we're shutting down.
 			select {
 			case <-s.done:
-				return nil
+				return
 			case <-ctx.Done():
-				return nil
+				return
 			default:
 			}
 			// Transient error — log and continue.
 			if !errors.Is(err, net.ErrClosed) {
 				s.logger.Error("accept error", "error", err)
 			}
-			return nil
+			return
 		}
 
 		go s.handleConn(ctx, conn)
 	}
 }
 
-// Stop closes the listener and removes the socket file.
+// Stop closes the listeners and removes the socket file.
 func (s *Server) Stop() error {
 	s.mu.Lock()
 	ln := s.listener
+	tcpLn := s.tcpListener
 	s.mu.Unlock()
 
 	select {
@@ -106,10 +156,27 @@ func (s *Server) Stop() error {
 			errs = append(errs, err)
 		}
 	}
+	if tcpLn != nil {
+		if err := tcpLn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			errs = append(errs, err)
+		}
+	}
 	if err := os.Remove(s.socketPath); err != nil && !os.IsNotExist(err) {
 		errs = append(errs, err)
 	}
 	return errors.Join(errs...)
+}
+
+// TCPAddr returns the TCP listener's address, or an empty string if TCP is
+// not enabled. This is useful when the server was started with ":0" to let
+// the OS pick a free port.
+func (s *Server) TCPAddr() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.tcpListener != nil {
+		return s.tcpListener.Addr().String()
+	}
+	return ""
 }
 
 // checkStaleSocket detects whether a socket file already exists. If it does,

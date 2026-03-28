@@ -35,7 +35,8 @@ type RunnerState struct {
 // It attaches to a running daemon via the control socket and polls
 // the JSONL event store for live updates.
 type Model struct {
-	store *event.FileStore
+	store      *event.FileStore
+	remoteAddr string // TCP address for remote daemon; empty = local Unix socket
 
 	events   []event.Event
 	lastTime time.Time // timestamp of last event seen, for polling new ones
@@ -52,14 +53,17 @@ type Model struct {
 }
 
 // New creates a new TUI model that attaches to a running daemon.
-func New(store *event.FileStore) Model {
+// If remoteAddr is non-empty, the TUI connects via TCP instead of the
+// local Unix socket.
+func New(store *event.FileStore, remoteAddr string) Model {
 	m := Model{
-		store:     store,
-		events:    make([]event.Event, 0, maxEvents),
-		width:     80,
-		height:    24,
-		startTime: time.Now(),
-		runners:   make(map[string]*RunnerState),
+		store:      store,
+		remoteAddr: remoteAddr,
+		events:     make([]event.Event, 0, maxEvents),
+		width:      80,
+		height:     24,
+		startTime:  time.Now(),
+		runners:    make(map[string]*RunnerState),
 	}
 
 	// Get initial live status
@@ -127,9 +131,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// refreshLiveStatus queries the daemon via control socket.
+// refreshLiveStatus queries the daemon via control socket or TCP.
 func (m *Model) refreshLiveStatus() {
-	client, err := control.NewClient()
+	client, err := control.Connect(m.remoteAddr)
 	if err != nil {
 		m.daemonErr = "daemon not running"
 		m.liveStatus = nil

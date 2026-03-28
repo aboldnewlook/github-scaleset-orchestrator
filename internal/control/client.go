@@ -7,7 +7,7 @@ import (
 	"net"
 )
 
-// Client connects to the control server over a Unix socket.
+// Client connects to the control server over a Unix socket or TCP.
 type Client struct {
 	conn net.Conn
 }
@@ -25,6 +25,24 @@ func NewClientWithPath(socketPath string) (*Client, error) {
 		return nil, fmt.Errorf("daemon is not running")
 	}
 	return &Client{conn: conn}, nil
+}
+
+// NewClientWithAddr dials a TCP address.
+func NewClientWithAddr(addr string) (*Client, error) {
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("connecting to remote daemon at %s: %w", addr, err)
+	}
+	return &Client{conn: conn}, nil
+}
+
+// Connect returns a client connected to a remote TCP address if addr is
+// non-empty, otherwise falls back to the local Unix socket.
+func Connect(addr string) (*Client, error) {
+	if addr != "" {
+		return NewClientWithAddr(addr)
+	}
+	return NewClient()
 }
 
 // Call sends a request to the daemon and returns the result.

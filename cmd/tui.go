@@ -24,7 +24,7 @@ func init() {
 
 func runTUI(cmd *cobra.Command, args []string) error {
 	// Verify daemon is running before launching the TUI
-	client, err := control.NewClient()
+	client, err := control.Connect(remoteAddr)
 	if err != nil {
 		return fmt.Errorf("cannot connect to daemon: %w\nStart the daemon first with: gso start", err)
 	}
@@ -38,7 +38,7 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	storePath := filepath.Join(cacheDir, "gso", "events.jsonl")
 	store := event.NewFileStore(storePath)
 
-	model := tui.New(store)
+	model := tui.New(store, remoteAddr)
 	p := tea.NewProgram(model, tea.WithAltScreen())
 
 	if _, err := p.Run(); err != nil {
