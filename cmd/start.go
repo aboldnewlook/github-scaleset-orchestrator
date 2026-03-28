@@ -17,14 +17,18 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var startCmd = &cobra.Command{
-	Use:   "start",
-	Short: "Start the orchestrator daemon",
-	RunE:  runStart,
-}
+var (
+	listenAddr string
+	startCmd   = &cobra.Command{
+		Use:   "start",
+		Short: "Start the orchestrator daemon",
+		RunE:  runStart,
+	}
+)
 
 func init() {
 	rootCmd.AddCommand(startCmd)
+	startCmd.Flags().StringVar(&listenAddr, "listen", "", "TCP address to listen on (e.g. :9100)")
 }
 
 func runStart(cmd *cobra.Command, args []string) error {
@@ -62,7 +66,12 @@ func runStart(cmd *cobra.Command, args []string) error {
 	// Control socket server
 	runtime := service.NewRuntime(orch, cancel, logger)
 	socketPath := control.SocketPath()
-	ctrlServer := control.NewServer(socketPath, runtime, logger)
+
+	var serverOpts []control.ServerOption
+	if listenAddr != "" {
+		serverOpts = append(serverOpts, control.WithTCPAddr(listenAddr))
+	}
+	ctrlServer := control.NewServer(socketPath, runtime, logger, serverOpts...)
 
 	go func() {
 		if err := ctrlServer.Start(ctx); err != nil {

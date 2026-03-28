@@ -19,7 +19,7 @@ func init() {
 }
 
 func runStop(cmd *cobra.Command, args []string) error {
-	client, err := control.NewClient()
+	client, err := control.Connect(remoteAddr)
 	if err != nil {
 		return fmt.Errorf("%w (is the daemon running?)", err)
 	}

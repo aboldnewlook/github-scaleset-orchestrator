@@ -7,8 +7,9 @@ import (
 )
 
 var (
-	cfgFile string
-	rootCmd = &cobra.Command{
+	cfgFile    string
+	remoteAddr string
+	rootCmd    = &cobra.Command{
 		Use:   "gso",
 		Short: "Multi-repo GitHub Actions self-hosted runner orchestrator",
 	}
@@ -22,4 +23,5 @@ func Execute() {
 
 func init() {
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "config.yaml", "config file path")
+	rootCmd.PersistentFlags().StringVar(&remoteAddr, "remote", "", "connect to remote daemon at host:port")
 }
