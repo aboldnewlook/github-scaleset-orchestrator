@@ -66,8 +66,10 @@ WORKDIR /home/runner
 
 COPY --chmod=755 <<'EOF' /usr/local/bin/docker-entrypoint.sh
 #!/bin/sh
-if [ -n "$GSO_CONFIG" ]; then
-  echo "$GSO_CONFIG" > /etc/gso/config.yaml
+if [ -n "$GSO_CONFIG_B64" ]; then
+  echo "$GSO_CONFIG_B64" | base64 -d > /etc/gso/config.yaml
+elif [ -n "$GSO_CONFIG" ]; then
+  printf '%s\n' "$GSO_CONFIG" > /etc/gso/config.yaml
 fi
 exec gso "$@"
 EOF
