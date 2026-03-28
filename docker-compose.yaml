@@ -13,7 +13,7 @@ services:
     #   - gh_token
     # In config.yaml, set:
     #   auth:
-    #     token_file: /run/secrets/gh_token
+    #     file: /run/secrets/gh_token
 
 # secrets:
 #   gh_token:

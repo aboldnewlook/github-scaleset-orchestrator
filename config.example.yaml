@@ -1,11 +1,11 @@
 # GitHub Scale Set Orchestrator (gso) configuration
 
 # Global auth - used for repos that don't specify their own token.
-# Resolution order: token_env → token_keychain → token_file
+# Resolution order: env → keychain → file
 auth:
-  token_env: GITHUB_TOKEN              # read from env var
-  # token_keychain: default            # read from OS keychain (macOS Keychain, GNOME Keyring, Windows Credential Manager)
-  # token_file: /run/secrets/gh_token  # read from file (Docker secrets, Vault, etc.)
+  env: GITHUB_TOKEN              # read from env var
+  # keychain: default            # read from OS keychain (macOS Keychain, GNOME Keyring, Windows Credential Manager)
+  # file: /run/secrets/gh_token  # read from file (Docker secrets, Vault, etc.)
 
 # Maximum concurrent runner processes (default: number of CPUs)
 max_runners: 4
@@ -21,13 +21,13 @@ repos:
   - name: owner/repo-b
     # Per-repo token override (same resolution options)
     token:
-      token_env: REPO_B_TOKEN
+      env: REPO_B_TOKEN
 
   - name: owner/repo-c
     token:
-      token_keychain: repo-c
+      keychain: repo-c
 
   # Repos under a different account/org can use a separate token
   - name: other-owner/repo-d
     token:
-      token_env: OTHER_OWNER_TOKEN
+      env: OTHER_OWNER_TOKEN

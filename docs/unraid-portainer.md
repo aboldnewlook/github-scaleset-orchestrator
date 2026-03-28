@@ -36,7 +36,7 @@ Create a `config.yaml` for your repos. This can live in a git repo that Portaine
 
 ```yaml
 auth:
-  token_env: GITHUB_TOKEN
+  env: GITHUB_TOKEN
 
 max_runners: 4
 
@@ -58,14 +58,14 @@ If you have repos under different accounts or orgs, use per-repo token overrides
 
 ```yaml
 auth:
-  token_env: GITHUB_TOKEN       # default token for most repos
+  env: GITHUB_TOKEN       # default token for most repos
 
 repos:
   - name: personal/repo-a       # uses GITHUB_TOKEN
   - name: personal/repo-b       # uses GITHUB_TOKEN
   - name: myorg/repo-c          # uses a different token
     token:
-      token_env: MYORG_TOKEN
+      env: MYORG_TOKEN
 ```
 
 Add both `GITHUB_TOKEN` and `MYORG_TOKEN` as environment variables in your Portainer stack.

@@ -81,7 +81,7 @@ Edit `config.yaml` with your repos and token source:
 
 ```yaml
 auth:
-  token_keychain: default    # or token_env / token_file
+  keychain: default    # or env / file
 
 max_runners: 4
 
@@ -120,13 +120,13 @@ Stop with Ctrl-C for graceful shutdown.
 
 ```yaml
 # Global auth -- used for repos that don't specify their own token.
-# Resolution order: token_env -> token_keychain -> token_file
+# Resolution order: env -> keychain -> file
 # The first non-empty value wins.
 auth:
-  token_env: GITHUB_TOKEN              # Read token from this environment variable
-  # token_keychain: default            # Read from OS keychain (macOS Keychain,
-                                       # GNOME Keyring, Windows Credential Manager)
-  # token_file: /run/secrets/gh_token  # Read from file (Docker secrets, Vault, etc.)
+  env: GITHUB_TOKEN              # Read token from this environment variable
+  # keychain: default            # Read from OS keychain (macOS Keychain,
+                                 # GNOME Keyring, Windows Credential Manager)
+  # file: /run/secrets/gh_token  # Read from file (Docker secrets, Vault, etc.)
 
 # Maximum concurrent runner processes.
 # Default: number of CPUs on the machine (runtime.NumCPU()).
@@ -145,20 +145,20 @@ repos:
   - name: owner/repo-b
     # Per-repo token override (same resolution options as global auth)
     token:
-      token_env: REPO_B_TOKEN
+      env: REPO_B_TOKEN
 
   - name: owner/repo-c
     token:
-      token_keychain: repo-c
+      keychain: repo-c
 ```
 
 ### Token Resolution
 
 Tokens are resolved in order: environment variable, OS keychain, file. The first non-empty value wins. Per-repo tokens take precedence over global auth.
 
-**Environment variable:** Set `token_env` to the name of an env var containing the PAT.
+**Environment variable:** Set `env` to the name of an env var containing the PAT.
 
-**OS Keychain:** Set `token_keychain` to an account name. Store the token with:
+**OS Keychain:** Set `keychain` to an account name. Store the token with:
 
 ```sh
 gso token -set <account-name>
@@ -166,7 +166,7 @@ gso token -set <account-name>
 
 Supported backends: macOS Keychain, GNOME Keyring (Linux), Windows Credential Manager.
 
-**File:** Set `token_file` to a path. The file should contain just the token (whitespace is trimmed). Useful for Docker secrets or Vault agent.
+**File:** Set `file` to a path. The file should contain just the token (whitespace is trimmed). Useful for Docker secrets or Vault agent.
 
 ## Security Considerations
 
@@ -189,7 +189,7 @@ There is no way to scope a PAT to just "manage runners" at the repo level.
 
 2. **Per-repo tokens.** Use a separate PAT per repo (or group of repos) so a compromise of one token does not affect the others.
 
-3. **OS keychain storage.** Tokens stored in the keychain are encrypted at rest and protected by your OS login credentials. Prefer `token_keychain` over `token_env` or `token_file`.
+3. **OS keychain storage.** Tokens stored in the keychain are encrypted at rest and protected by your OS login credentials. Prefer `keychain` over `env` or `file`.
 
 4. **Runner process isolation.** The runner subprocess never sees your PAT. It receives only a JIT config (a short-lived, single-use credential). Your PAT is used only by the orchestrator to call the Scale Set API.
 

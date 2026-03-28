@@ -1,47 +1,105 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"runtime"
+	"strings"
 
-	"gopkg.in/yaml.v3"
+	"github.com/spf13/viper"
 )
 
 // TokenSource defines how to resolve a GitHub PAT.
 // Resolution order: Env, Keychain, File.
 // The first non-empty value wins.
 type TokenSource struct {
-	Env      string `yaml:"token_env"`      // env var name (e.g. "GITHUB_TOKEN")
-	Keychain string `yaml:"token_keychain"` // OS keyring service name
-	File     string `yaml:"token_file"`     // path to file containing token
+	Env      string `yaml:"env"      mapstructure:"env"      json:"env"`
+	Keychain string `yaml:"keychain" mapstructure:"keychain" json:"keychain"`
+	File     string `yaml:"file"     mapstructure:"file"     json:"file"`
 }
 
 type Repo struct {
-	Name  string      `yaml:"name"`
-	Token TokenSource `yaml:"token,omitempty"` // per-repo override
+	Name  string      `yaml:"name"            mapstructure:"name"  json:"name"`
+	Token TokenSource `yaml:"token,omitempty" mapstructure:"token" json:"token"`
 }
 
 type Config struct {
-	Auth       TokenSource `yaml:"auth"`
-	MaxRunners int         `yaml:"max_runners"`
-	Labels     []string    `yaml:"labels"`
-	Repos      []Repo      `yaml:"repos"`
+	Auth       TokenSource `yaml:"auth"        mapstructure:"auth"`
+	MaxRunners int         `yaml:"max_runners" mapstructure:"max_runners"`
+	Labels     []string    `yaml:"labels"      mapstructure:"labels"`
+	Repos      []Repo      `yaml:"repos"       mapstructure:"repos"`
 }
 
+// Load reads configuration from the given file path, overlaid with environment
+// variables using the GSO_ prefix. If the file does not exist but environment
+// variables provide sufficient configuration, the file is treated as optional.
 func Load(path string) (*Config, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("reading config: %w", err)
+	v := viper.New()
+
+	// Defaults
+	v.SetDefault("max_runners", runtime.NumCPU())
+	v.SetDefault("labels", []string{"self-hosted"})
+
+	// Config file
+	v.SetConfigType("yaml")
+
+	fileExists := false
+	if path != "" {
+		if _, err := os.Stat(path); err == nil {
+			fileExists = true
+			v.SetConfigFile(path)
+			if err := v.ReadInConfig(); err != nil {
+				return nil, fmt.Errorf("parsing config: %w", err)
+			}
+		} else if !os.IsNotExist(err) {
+			return nil, fmt.Errorf("reading config: %w", err)
+		}
 	}
 
-	cfg := &Config{
-		MaxRunners: runtime.NumCPU(),
-		Labels:     []string{"self-hosted"},
+	// Bind specific env vars to config keys. We intentionally do NOT use
+	// AutomaticEnv because GSO_REPOS needs special handling (JSON string
+	// → slice-of-structs) and AutomaticEnv would feed the raw string to
+	// Unmarshal, causing a decode error.
+	_ = v.BindEnv("auth.env", "GSO_AUTH_ENV")
+	_ = v.BindEnv("auth.keychain", "GSO_AUTH_KEYCHAIN")
+	_ = v.BindEnv("auth.file", "GSO_AUTH_FILE")
+	_ = v.BindEnv("max_runners", "GSO_MAX_RUNNERS")
+	_ = v.BindEnv("labels", "GSO_LABELS")
+
+	// Parse GSO_REPOS before Viper unmarshal -- Viper can't map an env
+	// string into a slice-of-structs, so we handle it ourselves.
+	var envRepos []Repo
+	if reposJSON := os.Getenv("GSO_REPOS"); reposJSON != "" {
+		if err := json.Unmarshal([]byte(reposJSON), &envRepos); err != nil {
+			return nil, fmt.Errorf("parsing GSO_REPOS: %w", err)
+		}
+		// Remove repos from Viper so Unmarshal doesn't choke on the string
+		v.Set("repos", nil)
 	}
 
-	if err := yaml.Unmarshal(data, cfg); err != nil {
+	cfg := &Config{}
+
+	if err := v.Unmarshal(cfg); err != nil {
 		return nil, fmt.Errorf("parsing config: %w", err)
+	}
+
+	// Apply GSO_REPOS (overrides file-based repos)
+	if envRepos != nil {
+		cfg.Repos = envRepos
+	}
+
+	// Handle GSO_LABELS as comma-separated when set via env
+	if labelsEnv := os.Getenv("GSO_LABELS"); labelsEnv != "" {
+		cfg.Labels = strings.Split(labelsEnv, ",")
+		for i, l := range cfg.Labels {
+			cfg.Labels[i] = strings.TrimSpace(l)
+		}
+	}
+
+	// If no config file and no repos from env, report the missing file
+	if !fileExists && len(cfg.Repos) == 0 && path != "" {
+		return nil, fmt.Errorf("reading config: open %s: no such file or directory", path)
 	}
 
 	if err := cfg.validate(); err != nil {
@@ -68,7 +126,7 @@ func (c *Config) TokenForRepo(repo Repo) (string, error) {
 		return token, nil
 	}
 
-	return "", fmt.Errorf("no token configured for repo %s (set auth.token_env, auth.token_keychain, auth.token_file, or per-repo token)", repo.Name)
+	return "", fmt.Errorf("no token configured for repo %s (set auth.env, auth.keychain, auth.file, or per-repo token)", repo.Name)
 }
 
 func (c *Config) validate() error {

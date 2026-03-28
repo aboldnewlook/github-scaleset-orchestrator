@@ -13,7 +13,7 @@ func TestLoadValidConfig(t *testing.T) {
 
 	yaml := `
 auth:
-  token_env: GITHUB_TOKEN
+  env: GITHUB_TOKEN
 max_runners: 3
 labels:
   - self-hosted
@@ -41,7 +41,7 @@ repos:
 		t.Fatalf("expected 2 repos, got %d", len(cfg.Repos))
 	}
 	if cfg.Auth.Env != "GITHUB_TOKEN" {
-		t.Fatalf("expected auth.token_env GITHUB_TOKEN, got %q", cfg.Auth.Env)
+		t.Fatalf("expected auth.env GITHUB_TOKEN, got %q", cfg.Auth.Env)
 	}
 }
 
@@ -51,7 +51,7 @@ func TestLoadDefaults(t *testing.T) {
 
 	yaml := `
 auth:
-  token_env: GH_TOK
+  env: GH_TOK
 repos:
   - name: org/repo
 `
@@ -101,17 +101,17 @@ func TestLoadValidation(t *testing.T) {
 	}{
 		{
 			name:    "no repos",
-			yaml:    "auth:\n  token_env: GH_TOK\nrepos: []\n",
+			yaml:    "auth:\n  env: GH_TOK\nrepos: []\n",
 			wantErr: "at least one repo",
 		},
 		{
 			name:    "max_runners zero",
-			yaml:    "auth:\n  token_env: GH_TOK\nmax_runners: 0\nrepos:\n  - name: org/repo\n",
+			yaml:    "auth:\n  env: GH_TOK\nmax_runners: 0\nrepos:\n  - name: org/repo\n",
 			wantErr: "max_runners must be at least 1",
 		},
 		{
 			name:    "empty repo name",
-			yaml:    "auth:\n  token_env: GH_TOK\nrepos:\n  - name: \"\"\n",
+			yaml:    "auth:\n  env: GH_TOK\nrepos:\n  - name: \"\"\n",
 			wantErr: "repo name is required",
 		},
 		{
@@ -121,7 +121,7 @@ func TestLoadValidation(t *testing.T) {
 		},
 		{
 			name: "per-repo token without global auth is ok",
-			yaml: "repos:\n  - name: org/repo\n    token:\n      token_env: REPO_TOK\n",
+			yaml: "repos:\n  - name: org/repo\n    token:\n      env: REPO_TOK\n",
 		},
 	}
 
@@ -320,6 +320,186 @@ func TestResolve_EmptyTokenFile(t *testing.T) {
 	}
 	if tok != "" {
 		t.Fatalf("expected empty token for whitespace-only file, got %q", tok)
+	}
+}
+
+// --- Viper / environment variable tests ---
+
+func TestLoadFromEnvVarsOnly(t *testing.T) {
+	t.Setenv("GSO_AUTH_ENV", "GITHUB_TOKEN")
+	t.Setenv("GSO_MAX_RUNNERS", "5")
+	t.Setenv("GSO_LABELS", "self-hosted,linux")
+	t.Setenv("GSO_REPOS", `[{"name":"owner/repo-a"},{"name":"owner/repo-b"}]`)
+
+	cfg, err := Load("/nonexistent/path/config.yaml")
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+
+	if cfg.Auth.Env != "GITHUB_TOKEN" {
+		t.Fatalf("expected auth.env GITHUB_TOKEN, got %q", cfg.Auth.Env)
+	}
+	if cfg.MaxRunners != 5 {
+		t.Fatalf("expected max_runners 5, got %d", cfg.MaxRunners)
+	}
+	if len(cfg.Labels) != 2 || cfg.Labels[0] != "self-hosted" || cfg.Labels[1] != "linux" {
+		t.Fatalf("expected labels [self-hosted linux], got %v", cfg.Labels)
+	}
+	if len(cfg.Repos) != 2 {
+		t.Fatalf("expected 2 repos, got %d", len(cfg.Repos))
+	}
+	if cfg.Repos[0].Name != "owner/repo-a" {
+		t.Fatalf("expected first repo owner/repo-a, got %q", cfg.Repos[0].Name)
+	}
+}
+
+func TestLoadEnvVarsOverrideFile(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+
+	yaml := `
+auth:
+  env: FILE_TOKEN
+max_runners: 2
+labels:
+  - self-hosted
+repos:
+  - name: org/repo-file
+`
+	if err := os.WriteFile(cfgPath, []byte(yaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Env vars should override file values
+	t.Setenv("GSO_AUTH_ENV", "ENV_TOKEN")
+	t.Setenv("GSO_MAX_RUNNERS", "8")
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+
+	if cfg.Auth.Env != "ENV_TOKEN" {
+		t.Fatalf("expected env override for auth.env, got %q", cfg.Auth.Env)
+	}
+	if cfg.MaxRunners != 8 {
+		t.Fatalf("expected env override for max_runners 8, got %d", cfg.MaxRunners)
+	}
+	// Repos should still come from file
+	if len(cfg.Repos) != 1 || cfg.Repos[0].Name != "org/repo-file" {
+		t.Fatalf("expected file repos preserved, got %v", cfg.Repos)
+	}
+}
+
+func TestLoadEnvReposOverrideFile(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+
+	yaml := `
+auth:
+  env: GITHUB_TOKEN
+repos:
+  - name: org/file-repo
+`
+	if err := os.WriteFile(cfgPath, []byte(yaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("GSO_REPOS", `[{"name":"org/env-repo"}]`)
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+
+	if len(cfg.Repos) != 1 || cfg.Repos[0].Name != "org/env-repo" {
+		t.Fatalf("expected GSO_REPOS to override file repos, got %v", cfg.Repos)
+	}
+}
+
+func TestLoadEnvReposInvalidJSON(t *testing.T) {
+	t.Setenv("GSO_AUTH_ENV", "GITHUB_TOKEN")
+	t.Setenv("GSO_REPOS", `not-valid-json`)
+
+	_, err := Load("/nonexistent/config.yaml")
+	if err == nil {
+		t.Fatal("expected error for invalid GSO_REPOS JSON")
+	}
+	if !containsSubstr(err.Error(), "parsing GSO_REPOS") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestLoadEnvAuthTokenFile(t *testing.T) {
+	t.Setenv("GSO_AUTH_FILE", "/path/to/token")
+	t.Setenv("GSO_REPOS", `[{"name":"org/repo"}]`)
+
+	cfg, err := Load("/nonexistent/config.yaml")
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+
+	if cfg.Auth.File != "/path/to/token" {
+		t.Fatalf("expected auth.file /path/to/token, got %q", cfg.Auth.File)
+	}
+}
+
+func TestLoadEnvAuthTokenKeychain(t *testing.T) {
+	t.Setenv("GSO_AUTH_KEYCHAIN", "my-keychain-entry")
+	t.Setenv("GSO_REPOS", `[{"name":"org/repo"}]`)
+
+	cfg, err := Load("/nonexistent/config.yaml")
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+
+	if cfg.Auth.Keychain != "my-keychain-entry" {
+		t.Fatalf("expected auth.keychain my-keychain-entry, got %q", cfg.Auth.Keychain)
+	}
+}
+
+func TestLoadEnvOnlyDefaults(t *testing.T) {
+	// Only set required env vars, let defaults handle the rest
+	t.Setenv("GSO_AUTH_ENV", "GITHUB_TOKEN")
+	t.Setenv("GSO_REPOS", `[{"name":"org/repo"}]`)
+
+	cfg, err := Load("/nonexistent/config.yaml")
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+
+	if cfg.MaxRunners != runtime.NumCPU() {
+		t.Fatalf("expected default max_runners %d, got %d", runtime.NumCPU(), cfg.MaxRunners)
+	}
+	if len(cfg.Labels) != 1 || cfg.Labels[0] != "self-hosted" {
+		t.Fatalf("expected default labels [self-hosted], got %v", cfg.Labels)
+	}
+}
+
+func TestLoadEmptyPathWithEnvVars(t *testing.T) {
+	t.Setenv("GSO_AUTH_ENV", "GITHUB_TOKEN")
+	t.Setenv("GSO_REPOS", `[{"name":"org/repo"}]`)
+
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+
+	if cfg.Auth.Env != "GITHUB_TOKEN" {
+		t.Fatalf("expected auth.env GITHUB_TOKEN, got %q", cfg.Auth.Env)
+	}
+}
+
+func TestLoadReposWithPerRepoToken(t *testing.T) {
+	t.Setenv("GSO_REPOS", `[{"name":"org/repo","token":{"env":"REPO_TOKEN"}}]`)
+
+	cfg, err := Load("/nonexistent/config.yaml")
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+
+	if cfg.Repos[0].Token.Env != "REPO_TOKEN" {
+		t.Fatalf("expected per-repo env REPO_TOKEN, got %q", cfg.Repos[0].Token.Env)
 	}
 }
 
