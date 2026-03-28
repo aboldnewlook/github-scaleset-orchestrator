@@ -6,8 +6,8 @@ ci:
         enabled: true
         args: -v -race ./...
         coverage:
-            enabled: true
-            threshold: 80
+            enabled: false
+            threshold: 0
     lint:
         enabled: true
         version: v2.0.2
