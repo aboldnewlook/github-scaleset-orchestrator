@@ -16,7 +16,10 @@ type Handler interface {
 	HandleRequest(ctx context.Context, req Request) Response
 }
 
-// Server listens on a Unix domain socket and dispatches requests to a Handler.
+// DefaultTCPAddr is the default TCP address the control server listens on.
+const DefaultTCPAddr = ":9100"
+
+// Server listens on a Unix domain socket and TCP, dispatching requests to a Handler.
 type Server struct {
 	socketPath  string
 	handler     Handler
@@ -45,6 +48,7 @@ func WithTCPAddr(addr string) ServerOption {
 func NewServer(socketPath string, handler Handler, logger *slog.Logger, opts ...ServerOption) *Server {
 	s := &Server{
 		socketPath: socketPath,
+		tcpAddr:    DefaultTCPAddr,
 		handler:    handler,
 		logger:     logger,
 		done:       make(chan struct{}),

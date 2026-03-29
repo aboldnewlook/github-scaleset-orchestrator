@@ -28,7 +28,7 @@ var (
 
 func init() {
 	rootCmd.AddCommand(startCmd)
-	startCmd.Flags().StringVar(&listenAddr, "listen", "", "TCP address to listen on (e.g. :9100)")
+	startCmd.Flags().StringVar(&listenAddr, "listen", control.DefaultTCPAddr, "TCP address to listen on")
 }
 
 func runStart(cmd *cobra.Command, args []string) error {
@@ -67,11 +67,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 	runtime := service.NewRuntime(orch, cancel, logger)
 	socketPath := control.SocketPath()
 
-	var serverOpts []control.ServerOption
-	if listenAddr != "" {
-		serverOpts = append(serverOpts, control.WithTCPAddr(listenAddr))
-	}
-	ctrlServer := control.NewServer(socketPath, runtime, logger, serverOpts...)
+	ctrlServer := control.NewServer(socketPath, runtime, logger, control.WithTCPAddr(listenAddr))
 
 	go func() {
 		if err := ctrlServer.Start(ctx); err != nil {
