@@ -27,7 +27,7 @@ RUN set -eux; \
     echo "Runner ${VERSION} extracted successfully"
 
 # Stage 3: Runtime image
-FROM ubuntu:24.04
+FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
@@ -35,8 +35,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     jq \
     nodejs \
     ca-certificates \
-    libicu74 \
-    libssl3t64 \
+    libicu72 \
+    libssl3 \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root runner user
