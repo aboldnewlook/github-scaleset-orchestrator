@@ -16,14 +16,21 @@ type Handler interface {
 	HandleRequest(ctx context.Context, req Request) Response
 }
 
-// Server listens on a Unix domain socket and dispatches requests to a Handler.
+// DefaultTCPAddr is the default TCP address the control server listens on.
+const DefaultTCPAddr = ":9100"
+
+// ControlTokenEnv is the environment variable for the shared control token.
+const ControlTokenEnv = "GSO_CONTROL_TOKEN"
+
+// Server listens on a Unix domain socket and TCP, dispatching requests to a Handler.
 type Server struct {
-	socketPath  string
-	handler     Handler
-	logger      *slog.Logger
-	listener    net.Listener
-	tcpAddr     string
-	tcpListener net.Listener
+	socketPath   string
+	handler      Handler
+	logger       *slog.Logger
+	listener     net.Listener
+	tcpAddr      string
+	tcpListener  net.Listener
+	controlToken string
 
 	mu   sync.Mutex
 	done chan struct{}
@@ -44,10 +51,12 @@ func WithTCPAddr(addr string) ServerOption {
 // continue to work unchanged.
 func NewServer(socketPath string, handler Handler, logger *slog.Logger, opts ...ServerOption) *Server {
 	s := &Server{
-		socketPath: socketPath,
-		handler:    handler,
-		logger:     logger,
-		done:       make(chan struct{}),
+		socketPath:   socketPath,
+		tcpAddr:      DefaultTCPAddr,
+		controlToken: os.Getenv(ControlTokenEnv),
+		handler:      handler,
+		logger:       logger,
+		done:         make(chan struct{}),
 	}
 	for _, o := range opts {
 		o(s)
@@ -104,15 +113,16 @@ func (s *Server) Start(ctx context.Context) error {
 			}
 		}()
 
-		go s.acceptLoop(ctx, tcpLn)
+		go s.acceptLoop(ctx, tcpLn, true)
 	}
 
-	s.acceptLoop(ctx, ln)
+	s.acceptLoop(ctx, ln, false)
 	return nil
 }
 
 // acceptLoop accepts connections on ln until the server is stopped or ctx is cancelled.
-func (s *Server) acceptLoop(ctx context.Context, ln net.Listener) {
+// If requireAuth is true, TCP connections must provide a valid control token.
+func (s *Server) acceptLoop(ctx context.Context, ln net.Listener, requireAuth bool) {
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -131,7 +141,8 @@ func (s *Server) acceptLoop(ctx context.Context, ln net.Listener) {
 			return
 		}
 
-		go s.handleConn(ctx, conn)
+		s.logger.Info("control connection accepted", "remote", conn.RemoteAddr().String(), "network", conn.RemoteAddr().Network())
+		go s.handleConn(ctx, conn, requireAuth)
 	}
 }
 
@@ -197,7 +208,7 @@ func (s *Server) checkStaleSocket() error {
 	return fmt.Errorf("another instance is already running (socket %s is active)", s.socketPath)
 }
 
-func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
+func (s *Server) handleConn(ctx context.Context, conn net.Conn, requireAuth bool) {
 	defer func() { _ = conn.Close() }()
 
 	dec := json.NewDecoder(conn)
@@ -205,11 +216,20 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 
 	var req Request
 	if err := dec.Decode(&req); err != nil {
+		s.logger.Warn("control request decode error", "remote", conn.RemoteAddr(), "error", err)
 		resp := Response{Error: fmt.Sprintf("invalid request: %v", err)}
 		enc.Encode(resp) //nolint:errcheck
 		return
 	}
 
+	if requireAuth && s.controlToken != "" && req.Token != s.controlToken {
+		s.logger.Warn("control request unauthorized", "remote", conn.RemoteAddr(), "method", req.Method)
+		resp := Response{Error: "unauthorized: invalid or missing control token"}
+		enc.Encode(resp) //nolint:errcheck
+		return
+	}
+
+	s.logger.Info("control request", "remote", conn.RemoteAddr(), "method", req.Method)
 	resp := s.handler.HandleRequest(ctx, req)
 	enc.Encode(resp) //nolint:errcheck
 }

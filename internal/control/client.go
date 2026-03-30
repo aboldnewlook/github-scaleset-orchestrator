@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"os"
 )
 
 // Client connects to the control server over a Unix socket or TCP.
@@ -47,7 +48,10 @@ func Connect(addr string) (*Client, error) {
 
 // Call sends a request to the daemon and returns the result.
 func (c *Client) Call(ctx context.Context, method string, params any) (json.RawMessage, error) {
-	req := Request{Method: method}
+	req := Request{
+		Method: method,
+		Token:  os.Getenv(ControlTokenEnv),
+	}
 
 	if params != nil {
 		p, err := json.Marshal(params)

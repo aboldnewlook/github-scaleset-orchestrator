@@ -6,6 +6,7 @@ import "encoding/json"
 type Request struct {
 	Method string          `json:"method"`
 	Params json.RawMessage `json:"params,omitempty"`
+	Token  string          `json:"token,omitempty"`
 }
 
 // Response is a JSON-RPC-like response returned over the control socket.

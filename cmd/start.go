@@ -28,7 +28,7 @@ var (
 
 func init() {
 	rootCmd.AddCommand(startCmd)
-	startCmd.Flags().StringVar(&listenAddr, "listen", "", "TCP address to listen on (e.g. :9100)")
+	startCmd.Flags().StringVar(&listenAddr, "listen", "", "override TCP listen address (default :9100)")
 }
 
 func runStart(cmd *cobra.Command, args []string) error {
