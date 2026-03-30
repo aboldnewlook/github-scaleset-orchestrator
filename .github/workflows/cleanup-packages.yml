@@ -1,0 +1,22 @@
+name: Cleanup packages
+
+on:
+  schedule:
+    - cron: "0 6 * * 0" # Weekly on Sunday at 6am UTC
+  workflow_dispatch:
+
+permissions:
+  packages: write
+
+jobs:
+  cleanup:
+    name: Delete old container images
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/delete-package-versions@v5
+        with:
+          package-name: github-scaleset-orchestrator
+          package-type: container
+          min-versions-to-keep: 5
+          delete-only-untagged-versions: false
+          ignore-versions: "^(latest|\\d+|\\d+\\.\\d+)$"
