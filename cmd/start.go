@@ -64,7 +64,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 	orch := orchestrator.New(cfg, logger, bus)
 
 	// Control socket server
-	runtime := service.NewRuntime(orch, cancel, logger)
+	runtime := service.NewRuntime(orch, cancel, logger, store)
 	socketPath := control.SocketPath()
 
 	var serverOpts []control.ServerOption

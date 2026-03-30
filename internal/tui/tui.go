@@ -22,13 +22,16 @@ const (
 // tickMsg fires periodically to refresh status and poll events.
 type tickMsg time.Time
 
+const runnerLingerDuration = 10 * time.Second
+
 // RunnerState tracks the state of an active runner derived from events.
 type RunnerState struct {
-	Name      string
-	Repo      string
-	SpawnedAt time.Time
-	JobName   string // set when job.started, cleared when completed
-	State     string // "starting", "running", "completing"
+	Name        string
+	Repo        string
+	SpawnedAt   time.Time
+	CompletedAt time.Time // set when runner finishes; used for linger display
+	JobName     string    // set when job.started, cleared when completed
+	State       string    // "starting", "running", "completing", "done"
 }
 
 // Model is the bubbletea model for the TUI dashboard.
@@ -159,28 +162,25 @@ func (m *Model) refreshLiveStatus() {
 	m.liveStatus = &status
 }
 
-// pollNewEvents reads new events from the JSONL store since our last read.
+// pollNewEvents reads new events from the JSONL store (local) or via
+// the live_events control method (remote).
 func (m *Model) pollNewEvents() {
-	if m.store == nil {
+	var newEvents []event.Event
+	var err error
+
+	if m.remoteAddr != "" {
+		newEvents, err = m.pollRemoteEvents()
+	} else if m.store != nil {
+		newEvents, err = m.pollLocalEvents()
+	} else {
 		return
 	}
 
-	since := m.lastTime
-	if since.IsZero() {
-		since = time.Now().Add(-1 * time.Hour)
-	}
-
-	filter := event.StoreFilter{
-		Since: since,
-	}
-
-	newEvents, err := m.store.Query(filter)
 	if err != nil || len(newEvents) == 0 {
 		return
 	}
 
 	for _, e := range newEvents {
-		// Skip events we've already seen (Query is inclusive of Since)
 		if !e.Time.After(m.lastTime) {
 			continue
 		}
@@ -195,6 +195,44 @@ func (m *Model) pollNewEvents() {
 			m.lastTime = e.Time
 		}
 	}
+}
+
+// pollLocalEvents reads from the local JSONL store.
+func (m *Model) pollLocalEvents() ([]event.Event, error) {
+	since := m.lastTime
+	if since.IsZero() {
+		since = time.Now().Add(-1 * time.Hour)
+	}
+	return m.store.Query(event.StoreFilter{Since: since})
+}
+
+// pollRemoteEvents fetches events from the daemon via the control socket.
+func (m *Model) pollRemoteEvents() ([]event.Event, error) {
+	client, err := control.Connect(m.remoteAddr)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = client.Close() }()
+
+	since := ""
+	if !m.lastTime.IsZero() {
+		since = m.lastTime.Format(time.RFC3339Nano)
+	} else {
+		since = time.Now().Add(-1 * time.Hour).Format(time.RFC3339Nano)
+	}
+
+	result, err := client.Call(context.Background(), control.MethodLiveEvents, control.LiveEventsParams{
+		Since: since,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	var events []event.Event
+	if err := json.Unmarshal(result, &events); err != nil {
+		return nil, err
+	}
+	return events, nil
 }
 
 // updateRunnerState updates the runner state map from an event.
@@ -225,7 +263,17 @@ func (m *Model) updateRunnerState(e event.Event) {
 		}
 	case event.EventRunnerCompleted, event.EventRunnerFailed:
 		name := payloadField(e.Payload, "name")
-		delete(m.runners, name)
+		if rs, ok := m.runners[name]; ok {
+			rs.State = "done"
+			rs.CompletedAt = e.Time
+		}
+	}
+
+	// Clean up runners that have lingered long enough
+	for name, rs := range m.runners {
+		if rs.State == "done" && time.Since(rs.CompletedAt) > runnerLingerDuration {
+			delete(m.runners, name)
+		}
 	}
 }
 

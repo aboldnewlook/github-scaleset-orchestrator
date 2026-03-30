@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/control"
+	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/event"
 )
 
 // OrchestratorState defines what Runtime needs from the orchestrator.
@@ -21,17 +23,22 @@ type OrchestratorState interface {
 // Runtime wraps orchestrator live state and implements control.Handler.
 type Runtime struct {
 	orch       OrchestratorState
+	store      *event.FileStore
 	cancelFunc context.CancelFunc
 	logger     *slog.Logger
 }
 
 // NewRuntime creates a new Runtime service.
-func NewRuntime(orch OrchestratorState, cancelFunc context.CancelFunc, logger *slog.Logger) *Runtime {
-	return &Runtime{
+func NewRuntime(orch OrchestratorState, cancelFunc context.CancelFunc, logger *slog.Logger, store ...*event.FileStore) *Runtime {
+	r := &Runtime{
 		orch:       orch,
 		cancelFunc: cancelFunc,
 		logger:     logger,
 	}
+	if len(store) > 0 {
+		r.store = store[0]
+	}
+	return r
 }
 
 // HandleRequest dispatches a control request to the appropriate method.
@@ -43,6 +50,20 @@ func (r *Runtime) HandleRequest(ctx context.Context, req control.Request) contro
 			return control.Response{Error: err.Error()}
 		}
 		data, _ := json.Marshal(result)
+		return control.Response{Result: data}
+
+	case control.MethodLiveEvents:
+		var params control.LiveEventsParams
+		if req.Params != nil {
+			if err := json.Unmarshal(req.Params, &params); err != nil {
+				return control.Response{Error: fmt.Sprintf("invalid params: %v", err)}
+			}
+		}
+		events, err := r.LiveEvents(ctx, params.Since)
+		if err != nil {
+			return control.Response{Error: err.Error()}
+		}
+		data, _ := json.Marshal(events)
 		return control.Response{Result: data}
 
 	case control.MethodRecycleRunner:
@@ -92,6 +113,28 @@ func (r *Runtime) LiveStatus(ctx context.Context) (*control.LiveStatusResult, er
 		MaxRunners: r.orch.MaxRunners(),
 		Available:  r.orch.AvailableSlots(),
 	}, nil
+}
+
+// LiveEvents returns events since the given timestamp from the event store.
+func (r *Runtime) LiveEvents(_ context.Context, since string) ([]event.Event, error) {
+	if r.store == nil {
+		return nil, nil
+	}
+
+	filter := event.StoreFilter{}
+	if since != "" {
+		t, err := time.Parse(time.RFC3339Nano, since)
+		if err != nil {
+			return nil, fmt.Errorf("invalid since timestamp: %w", err)
+		}
+		filter.Since = t
+	}
+
+	events, err := r.store.Query(filter)
+	if err != nil {
+		return nil, fmt.Errorf("querying events: %w", err)
+	}
+	return events, nil
 }
 
 // RecycleRunner cancels a runner by name so it will be replaced.

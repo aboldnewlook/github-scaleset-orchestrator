@@ -18,10 +18,16 @@ type Response struct {
 // Method constants for the control protocol.
 const (
 	MethodLiveStatus    = "live_status"
+	MethodLiveEvents    = "live_events"
 	MethodRecycleRunner = "recycle_runner"
 	MethodSetMaxRunners = "set_max_runners"
 	MethodShutdown      = "shutdown"
 )
+
+// LiveEventsParams are the parameters for the live_events method.
+type LiveEventsParams struct {
+	Since string `json:"since,omitempty"` // RFC3339 timestamp
+}
 
 // RecycleRunnerParams are the parameters for the recycle_runner method.
 type RecycleRunnerParams struct {
