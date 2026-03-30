@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 )
 
 // Worker manages a single ephemeral runner subprocess.
@@ -43,7 +44,7 @@ func (w *Worker) Run(ctx context.Context, name string, jitConfig string) error {
 
 	cmd := exec.CommandContext(ctx, runScript)
 	cmd.Dir = workDir
-	cmd.Env = append(os.Environ(),
+	cmd.Env = append(SanitizedEnv(),
 		fmt.Sprintf("ACTIONS_RUNNER_INPUT_JITCONFIG=%s", jitConfig),
 	)
 	cmd.Stdout = os.Stdout
@@ -57,6 +58,34 @@ func (w *Worker) Run(ctx context.Context, name string, jitConfig string) error {
 
 	w.logger.Info("runner completed", "name", name)
 	return nil
+}
+
+// sensitiveEnvPrefixes are environment variable prefixes that should not be
+// passed to runner subprocesses to prevent workflow code from accessing
+// orchestrator secrets (PATs, control tokens, config).
+var sensitiveEnvPrefixes = []string{
+	"GSO_",
+	"GITHUB_TOKEN",
+	"ABNL_TOKEN",
+}
+
+// SanitizedEnv returns the current environment with sensitive variables removed.
+func SanitizedEnv() []string {
+	var env []string
+	for _, e := range os.Environ() {
+		key, _, _ := strings.Cut(e, "=")
+		sensitive := false
+		for _, prefix := range sensitiveEnvPrefixes {
+			if strings.HasPrefix(key, prefix) {
+				sensitive = true
+				break
+			}
+		}
+		if !sensitive {
+			env = append(env, e)
+		}
+	}
+	return env
 }
 
 // copyDir copies the contents of src into dst using hard links where possible,
