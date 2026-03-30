@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"syscall"
 
+	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/buildinfo"
 	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/config"
 	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/control"
 	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/event"
@@ -47,6 +48,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("loading config: %w", err)
 	}
 
+	logger.Info(buildinfo.String())
 	logger.Info("starting gso",
 		"repos", len(cfg.Repos),
 		"max_runners", cfg.MaxRunners,

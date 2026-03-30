@@ -8,7 +8,17 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/gso .
+
+ARG VERSION=dev
+ARG COMMIT=unknown
+ARG BUILD_DATE=unknown
+
+RUN CGO_ENABLED=0 GOOS=linux go build \
+    -ldflags="-s -w \
+      -X github.com/aboldnewlook/github-scaleset-orchestrator/internal/buildinfo.Version=${VERSION} \
+      -X github.com/aboldnewlook/github-scaleset-orchestrator/internal/buildinfo.Commit=${COMMIT} \
+      -X github.com/aboldnewlook/github-scaleset-orchestrator/internal/buildinfo.Date=${BUILD_DATE}" \
+    -o /out/gso .
 
 # Stage 2: Pre-bake the GitHub Actions runner binary
 FROM ubuntu:24.04 AS runner-dl

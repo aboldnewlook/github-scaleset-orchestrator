@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/buildinfo"
 	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/config"
 	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/event"
 	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/naming"
@@ -224,7 +225,7 @@ func (o *Orchestrator) runRepo(ctx context.Context, repo config.Repo, hostname s
 
 	sysInfo := scaleset.SystemInfo{
 		System:     "gso",
-		Version:    "0.1.0",
+		Version:    buildinfo.Version,
 		Subsystem:  "orchestrator",
 		ScaleSetID: ss.ID,
 	}

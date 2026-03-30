@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/buildinfo"
 	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/config"
 	"github.com/actions/scaleset"
 )
@@ -22,7 +23,7 @@ func NewScaleSetClient(_ context.Context, cfg *config.Config, repo config.Repo, 
 
 	sysInfo := scaleset.SystemInfo{
 		System:    "gso",
-		Version:   "0.1.0",
+		Version:   buildinfo.Version,
 		Subsystem: "client",
 	}
 
