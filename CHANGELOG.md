@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.5.0](https://github.com/aboldnewlook/github-scaleset-orchestrator/compare/v0.4.0...v0.5.0) (2026-03-30)
+
+
+### Features
+
+* add build-time version injection and version command ([6be8293](https://github.com/aboldnewlook/github-scaleset-orchestrator/commit/6be829305b39a74e2b89bc11effee76224228dbf))
+* security hardening, auto-TLS, TOFU, and IP allowlist ([e57aaeb](https://github.com/aboldnewlook/github-scaleset-orchestrator/commit/e57aaeb83687029c73313aaaec7b4e626be20d6b))
+
+
+### Bug Fixes
+
+* **ci:** add build-essential to runtime image for CGO support ([5e9b3e2](https://github.com/aboldnewlook/github-scaleset-orchestrator/commit/5e9b3e248fcc472325b60850f28ef3378c0a222f))
+
 ## [0.4.0](https://github.com/aboldnewlook/github-scaleset-orchestrator/compare/v0.3.0...v0.4.0) (2026-03-30)
 
 
