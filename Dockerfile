@@ -46,6 +46,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     jq \
     ca-certificates \
+    build-essential \
     libicu74 \
     libssl3t64 \
     && rm -rf /var/lib/apt/lists/*
