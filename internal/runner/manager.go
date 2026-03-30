@@ -16,17 +16,33 @@ import (
 	"time"
 )
 
+const (
+	// maxDownloadSize is the maximum allowed size for runner binary downloads (500 MB).
+	maxDownloadSize = 500 * 1024 * 1024
+	// maxJSONResponseSize is the maximum allowed size for JSON API responses (10 MB).
+	maxJSONResponseSize = 10 * 1024 * 1024
+	// httpClientTimeout is the timeout for all HTTP requests made by the manager.
+	httpClientTimeout = 10 * time.Minute
+)
+
 // Manager handles downloading and caching the GitHub Actions runner binary.
 type Manager struct {
-	cacheDir string
-	logger   *slog.Logger
+	cacheDir   string
+	logger     *slog.Logger
+	httpClient *http.Client
 }
 
 func NewManager(cacheDir string, logger *slog.Logger) (*Manager, error) {
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
 		return nil, fmt.Errorf("creating cache dir: %w", err)
 	}
-	return &Manager{cacheDir: cacheDir, logger: logger}, nil
+	return &Manager{
+		cacheDir: cacheDir,
+		logger:   logger,
+		httpClient: &http.Client{
+			Timeout: httpClientTimeout,
+		},
+	}, nil
 }
 
 // RunnerDir returns the path to the cached runner binaries, downloading if needed.
@@ -83,7 +99,7 @@ func (m *Manager) download(ctx context.Context, release *runnerRelease, dest, ch
 		return err
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := m.httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("downloading runner tarball: %w", err)
 	}
@@ -100,13 +116,15 @@ func (m *Manager) download(ctx context.Context, release *runnerRelease, dest, ch
 	defer func() { _ = os.Remove(tmpFile.Name()) }()
 	defer func() { _ = tmpFile.Close() }()
 
-	// Download with progress logging and checksum
+	// Download with progress logging and checksum.
+	// Wrap with LimitReader to prevent unbounded disk usage from a malicious response.
+	limitedBody := io.LimitReader(resp.Body, maxDownloadSize)
 	hasher := sha256.New()
 	writer := io.MultiWriter(tmpFile, hasher)
 
 	totalSize := resp.ContentLength
 	pr := &progressReader{
-		reader:    resp.Body,
+		reader:    limitedBody,
 		total:     totalSize,
 		logger:    m.logger,
 		interval:  30 * time.Second,
@@ -217,7 +235,7 @@ func (m *Manager) latestRelease(ctx context.Context) (*runnerRelease, error) {
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := m.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("fetching latest runner release: %w", err)
 	}
@@ -228,7 +246,7 @@ func (m *Manager) latestRelease(ctx context.Context) (*runnerRelease, error) {
 	}
 
 	var release ghRelease
-	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxJSONResponseSize)).Decode(&release); err != nil {
 		return nil, fmt.Errorf("decoding release: %w", err)
 	}
 
@@ -263,10 +281,17 @@ func (m *Manager) latestRelease(ctx context.Context) (*runnerRelease, error) {
 		return nil, fmt.Errorf("no runner binary found for %s/%s", runtime.GOOS, runtime.GOARCH)
 	}
 
-	// Fetch checksum if available
+	// Fetch checksum if available. Log a warning if it fails so the user
+	// knows verification was skipped; do not fail the download since the
+	// checksum URL may not exist for all versions.
 	var checksum string
 	if checksumURL != "" {
-		checksum, _ = m.fetchChecksum(ctx, checksumURL)
+		var err error
+		checksum, err = m.fetchChecksum(ctx, checksumURL)
+		if err != nil {
+			m.logger.Warn("failed to fetch runner checksum, verification will be skipped",
+				"url", checksumURL, "error", err)
+		}
 	}
 
 	version := strings.TrimPrefix(release.TagName, "v")
@@ -284,7 +309,7 @@ func (m *Manager) fetchChecksum(ctx context.Context, url string) (string, error)
 		return "", err
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := m.httpClient.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -294,7 +319,7 @@ func (m *Manager) fetchChecksum(ctx context.Context, url string) (string, error)
 		return "", fmt.Errorf("unexpected status: %d", resp.StatusCode)
 	}
 
-	data, err := io.ReadAll(resp.Body)
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxJSONResponseSize))
 	if err != nil {
 		return "", err
 	}

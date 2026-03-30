@@ -31,3 +31,13 @@ repos:
   - name: other-owner/repo-d
     token:
       env: OTHER_OWNER_TOKEN
+
+# Control server settings for remote TCP access.
+# TCP is always TLS-encrypted. Requires GSO_CONTROL_TOKEN env var.
+# control:
+#   listen: ":9100"                    # TCP listen address
+#   tls_cert: /path/to/cert.pem       # optional: use your own TLS cert
+#   tls_key: /path/to/key.pem         # optional: use your own TLS key
+#   allow_cidrs:                       # optional: restrict TCP to these CIDRs
+#     - 192.168.1.0/24
+#     - 10.0.0.0/8

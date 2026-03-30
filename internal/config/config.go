@@ -24,11 +24,20 @@ type Repo struct {
 	Token TokenSource `yaml:"token,omitempty" mapstructure:"token" json:"token"`
 }
 
+// ControlConfig defines settings for the remote TCP control server.
+type ControlConfig struct {
+	Listen     string   `yaml:"listen"      mapstructure:"listen"`
+	TLSCert    string   `yaml:"tls_cert"    mapstructure:"tls_cert"`
+	TLSKey     string   `yaml:"tls_key"     mapstructure:"tls_key"`
+	AllowCIDRs []string `yaml:"allow_cidrs" mapstructure:"allow_cidrs"`
+}
+
 type Config struct {
-	Auth       TokenSource `yaml:"auth"        mapstructure:"auth"`
-	MaxRunners int         `yaml:"max_runners" mapstructure:"max_runners"`
-	Labels     []string    `yaml:"labels"      mapstructure:"labels"`
-	Repos      []Repo      `yaml:"repos"       mapstructure:"repos"`
+	Auth       TokenSource   `yaml:"auth"        mapstructure:"auth"`
+	MaxRunners int           `yaml:"max_runners" mapstructure:"max_runners"`
+	Labels     []string      `yaml:"labels"      mapstructure:"labels"`
+	Repos      []Repo        `yaml:"repos"       mapstructure:"repos"`
+	Control    ControlConfig `yaml:"control"     mapstructure:"control"`
 }
 
 // Load reads configuration from the given file path, overlaid with environment
@@ -66,6 +75,9 @@ func Load(path string) (*Config, error) {
 	_ = v.BindEnv("auth.file", "GSO_AUTH_FILE")
 	_ = v.BindEnv("max_runners", "GSO_MAX_RUNNERS")
 	_ = v.BindEnv("labels", "GSO_LABELS")
+	_ = v.BindEnv("control.listen", "GSO_CONTROL_LISTEN")
+	_ = v.BindEnv("control.tls_cert", "GSO_CONTROL_TLS_CERT")
+	_ = v.BindEnv("control.tls_key", "GSO_CONTROL_TLS_KEY")
 
 	// Parse GSO_REPOS before Viper unmarshal -- Viper can't map an env
 	// string into a slice-of-structs, so we handle it ourselves.
@@ -95,6 +107,15 @@ func Load(path string) (*Config, error) {
 		for i, l := range cfg.Labels {
 			cfg.Labels[i] = strings.TrimSpace(l)
 		}
+	}
+
+	// Handle GSO_CONTROL_ALLOW_CIDRS as comma-separated when set via env
+	if cidrsEnv := os.Getenv("GSO_CONTROL_ALLOW_CIDRS"); cidrsEnv != "" {
+		cidrs := strings.Split(cidrsEnv, ",")
+		for i, c := range cidrs {
+			cidrs[i] = strings.TrimSpace(c)
+		}
+		cfg.Control.AllowCIDRs = cidrs
 	}
 
 	// If no config file and no repos from env, report the missing file

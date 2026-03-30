@@ -68,7 +68,28 @@ func extractTarGz(tarGzPath, dest string) error {
 			if err := outFile.Close(); err != nil {
 				return err
 			}
+		case tar.TypeLink:
+			// Hardlink targets are relative to the archive root, so join with dest.
+			linkTarget := filepath.Clean(filepath.Join(dest, hdr.Linkname))
+			if linkTarget != cleanDest && !strings.HasPrefix(linkTarget, cleanDest+string(os.PathSeparator)) {
+				return fmt.Errorf("illegal hardlink target in archive: %s -> %s (escapes destination)", hdr.Name, hdr.Linkname)
+			}
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				return err
+			}
+			if err := os.Link(linkTarget, target); err != nil {
+				return err
+			}
 		case tar.TypeSymlink:
+			// Guard against symlink escape — reject absolute targets
+			if filepath.IsAbs(hdr.Linkname) {
+				return fmt.Errorf("illegal symlink target in archive: %s -> %s (absolute path)", hdr.Name, hdr.Linkname)
+			}
+			// Resolve relative symlink target against the symlink's parent directory
+			resolvedLink := filepath.Clean(filepath.Join(filepath.Dir(target), hdr.Linkname))
+			if resolvedLink != cleanDest && !strings.HasPrefix(resolvedLink, cleanDest+string(os.PathSeparator)) {
+				return fmt.Errorf("illegal symlink target in archive: %s -> %s (escapes destination)", hdr.Name, hdr.Linkname)
+			}
 			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 				return err
 			}

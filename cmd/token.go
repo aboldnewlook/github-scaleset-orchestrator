@@ -2,9 +2,11 @@ package cmd
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/config"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 )
 
 var tokenCmd = &cobra.Command{
@@ -36,10 +38,12 @@ func runTokenSet(cmd *cobra.Command, args []string) error {
 	account := args[0]
 
 	fmt.Print("Enter token: ")
-	var token string
-	if _, err := fmt.Scanln(&token); err != nil {
+	raw, err := term.ReadPassword(int(os.Stdin.Fd()))
+	fmt.Println() // ReadPassword does not emit a newline
+	if err != nil {
 		return fmt.Errorf("reading token: %w", err)
 	}
+	token := string(raw)
 	if token == "" {
 		return fmt.Errorf("token cannot be empty")
 	}

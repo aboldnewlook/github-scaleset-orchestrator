@@ -2,13 +2,17 @@ package control
 
 import (
 	"context"
+	"crypto/subtle"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"os"
+	"path/filepath"
 	"sync"
+	"time"
 )
 
 // Handler processes control requests.
@@ -17,10 +21,14 @@ type Handler interface {
 }
 
 // DefaultTCPAddr is the default TCP address the control server listens on.
-const DefaultTCPAddr = ":9100"
+// Empty string means TCP is disabled by default (opt-in).
+const DefaultTCPAddr = ""
 
 // ControlTokenEnv is the environment variable for the shared control token.
 const ControlTokenEnv = "GSO_CONTROL_TOKEN"
+
+// connReadTimeout is the maximum time to wait for a client to send a request.
+const connReadTimeout = 30 * time.Second
 
 // Server listens on a Unix domain socket and TCP, dispatching requests to a Handler.
 type Server struct {
@@ -31,6 +39,10 @@ type Server struct {
 	tcpAddr      string
 	tcpListener  net.Listener
 	controlToken string
+	tlsConfig    *tls.Config
+	fingerprint  string
+	allowCIDRs   []string     // raw strings, parsed in Start()
+	allowNets    []*net.IPNet // parsed CIDRs
 
 	mu   sync.Mutex
 	done chan struct{}
@@ -43,6 +55,21 @@ type ServerOption func(*Server)
 func WithTCPAddr(addr string) ServerOption {
 	return func(s *Server) {
 		s.tcpAddr = addr
+	}
+}
+
+// WithTLSConfig provides a pre-loaded TLS config (for user-provided certs).
+func WithTLSConfig(cfg *tls.Config, fingerprint string) ServerOption {
+	return func(s *Server) {
+		s.tlsConfig = cfg
+		s.fingerprint = fingerprint
+	}
+}
+
+// WithAllowCIDRs restricts TCP connections to the given CIDRs.
+func WithAllowCIDRs(cidrs []string) ServerOption {
+	return func(s *Server) {
+		s.allowCIDRs = cidrs
 	}
 }
 
@@ -64,6 +91,11 @@ func NewServer(socketPath string, handler Handler, logger *slog.Logger, opts ...
 	return s
 }
 
+// Fingerprint returns the TLS certificate fingerprint, or empty if TLS is not configured.
+func (s *Server) Fingerprint() string {
+	return s.fingerprint
+}
+
 // Start begins listening on the Unix socket (and optionally TCP). It blocks
 // until ctx is cancelled or Stop is called.
 func (s *Server) Start(ctx context.Context) error {
@@ -74,6 +106,12 @@ func (s *Server) Start(ctx context.Context) error {
 	ln, err := net.Listen("unix", s.socketPath)
 	if err != nil {
 		return fmt.Errorf("listening on %s: %w", s.socketPath, err)
+	}
+
+	// Restrict Unix socket permissions to owner only.
+	if err := os.Chmod(s.socketPath, 0700); err != nil {
+		_ = ln.Close()
+		return fmt.Errorf("setting socket permissions: %w", err)
 	}
 
 	s.mu.Lock()
@@ -93,27 +131,63 @@ func (s *Server) Start(ctx context.Context) error {
 
 	// Start TCP listener if configured.
 	if s.tcpAddr != "" {
-		tcpLn, err := net.Listen("tcp", s.tcpAddr)
-		if err != nil {
-			_ = ln.Close()
-			return fmt.Errorf("listening on TCP %s: %w", s.tcpAddr, err)
-		}
-
-		s.mu.Lock()
-		s.tcpListener = tcpLn
-		s.mu.Unlock()
-
-		s.logger.Info("control server listening", "tcp", tcpLn.Addr().String())
-
-		go func() {
-			select {
-			case <-ctx.Done():
-				_ = tcpLn.Close()
-			case <-s.done:
+		if s.controlToken == "" {
+			s.logger.Warn("TCP listener disabled: GSO_CONTROL_TOKEN is not set")
+		} else {
+			// Parse CIDR allowlist if configured.
+			if len(s.allowCIDRs) > 0 {
+				nets, err := ParseCIDRs(s.allowCIDRs)
+				if err != nil {
+					_ = ln.Close()
+					return fmt.Errorf("parsing allow CIDRs: %w", err)
+				}
+				s.allowNets = nets
 			}
-		}()
 
-		go s.acceptLoop(ctx, tcpLn, true)
+			// Auto-generate TLS certificate if not provided via option.
+			if s.tlsConfig == nil {
+				certDir, err := CertDir()
+				if err != nil {
+					_ = ln.Close()
+					return fmt.Errorf("getting cert directory: %w", err)
+				}
+				certPath := filepath.Join(certDir, "server.crt")
+				keyPath := filepath.Join(certDir, "server.key")
+				tlsCfg, fp, err := LoadOrGenerateTLSConfig(certPath, keyPath, s.logger)
+				if err != nil {
+					_ = ln.Close()
+					return fmt.Errorf("loading TLS config: %w", err)
+				}
+				s.tlsConfig = tlsCfg
+				s.fingerprint = fp
+			}
+			s.logger.Info("TLS certificate fingerprint", "fingerprint", s.fingerprint)
+
+			tcpLn, err := net.Listen("tcp", s.tcpAddr)
+			if err != nil {
+				_ = ln.Close()
+				return fmt.Errorf("listening on TCP %s: %w", s.tcpAddr, err)
+			}
+
+			// Wrap the TCP listener with TLS.
+			tlsLn := tls.NewListener(tcpLn, s.tlsConfig)
+
+			s.mu.Lock()
+			s.tcpListener = tlsLn
+			s.mu.Unlock()
+
+			s.logger.Info("control server listening", "tcp", tlsLn.Addr().String())
+
+			go func() {
+				select {
+				case <-ctx.Done():
+					_ = tlsLn.Close()
+				case <-s.done:
+				}
+			}()
+
+			go s.acceptLoop(ctx, tlsLn, true)
+		}
 	}
 
 	s.acceptLoop(ctx, ln, false)
@@ -139,6 +213,15 @@ func (s *Server) acceptLoop(ctx context.Context, ln net.Listener, requireAuth bo
 				s.logger.Error("accept error", "error", err)
 			}
 			return
+		}
+
+		// Check IP allowlist for TCP connections.
+		if requireAuth && len(s.allowNets) > 0 {
+			if !CheckIPAllowed(conn.RemoteAddr(), s.allowNets) {
+				s.logger.Warn("connection rejected by IP allowlist", "remote", conn.RemoteAddr())
+				_ = conn.Close()
+				continue
+			}
 		}
 
 		s.logger.Info("control connection accepted", "remote", conn.RemoteAddr().String(), "network", conn.RemoteAddr().Network())
@@ -211,6 +294,10 @@ func (s *Server) checkStaleSocket() error {
 func (s *Server) handleConn(ctx context.Context, conn net.Conn, requireAuth bool) {
 	defer func() { _ = conn.Close() }()
 
+	// Set overall deadline to prevent slow clients from holding connections open.
+	// This covers both reading the request and writing the response.
+	_ = conn.SetDeadline(time.Now().Add(connReadTimeout))
+
 	dec := json.NewDecoder(conn)
 	enc := json.NewEncoder(conn)
 
@@ -222,7 +309,7 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn, requireAuth bool
 		return
 	}
 
-	if requireAuth && s.controlToken != "" && req.Token != s.controlToken {
+	if requireAuth && s.controlToken != "" && subtle.ConstantTimeCompare([]byte(req.Token), []byte(s.controlToken)) != 1 {
 		s.logger.Warn("control request unauthorized", "remote", conn.RemoteAddr(), "method", req.Method)
 		resp := Response{Error: "unauthorized: invalid or missing control token"}
 		enc.Encode(resp) //nolint:errcheck

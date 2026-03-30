@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/control"
 	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/event"
 	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/tui"
 	tea "github.com/charmbracelet/bubbletea"
@@ -24,7 +23,7 @@ func init() {
 
 func runTUI(cmd *cobra.Command, args []string) error {
 	// Verify daemon is running before launching the TUI
-	client, err := control.Connect(remoteAddr)
+	client, err := connectClient(remoteAddr)
 	if err != nil {
 		return fmt.Errorf("cannot connect to daemon: %w\nStart the daemon first with: gso start", err)
 	}

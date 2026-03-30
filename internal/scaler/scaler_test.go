@@ -23,11 +23,11 @@ func TestNewSemaphore(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			sem := NewSemaphore(tt.size)
-			if cap(sem) != tt.size {
-				t.Fatalf("cap = %d, want %d", cap(sem), tt.size)
-			}
 			if sem.Available() != tt.size {
 				t.Fatalf("Available() = %d, want %d", sem.Available(), tt.size)
+			}
+			if sem.Max() != tt.size {
+				t.Fatalf("Max() = %d, want %d", sem.Max(), tt.size)
 			}
 		})
 	}
@@ -36,12 +36,16 @@ func TestNewSemaphore(t *testing.T) {
 func TestSemaphoreAcquireRelease(t *testing.T) {
 	sem := NewSemaphore(2)
 
-	sem.Acquire()
+	if err := sem.Acquire(context.Background()); err != nil {
+		t.Fatalf("Acquire() error: %v", err)
+	}
 	if sem.Available() != 1 {
 		t.Fatalf("Available() = %d after 1 acquire, want 1", sem.Available())
 	}
 
-	sem.Acquire()
+	if err := sem.Acquire(context.Background()); err != nil {
+		t.Fatalf("Acquire() error: %v", err)
+	}
 	if sem.Available() != 0 {
 		t.Fatalf("Available() = %d after 2 acquires, want 0", sem.Available())
 	}
@@ -57,6 +61,82 @@ func TestSemaphoreAcquireRelease(t *testing.T) {
 	}
 }
 
+func TestSemaphoreAcquireContextCancellation(t *testing.T) {
+	sem := NewSemaphore(1)
+
+	// Fill the semaphore.
+	if err := sem.Acquire(context.Background()); err != nil {
+		t.Fatalf("Acquire() error: %v", err)
+	}
+
+	// Try to acquire with a cancelled context.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := sem.Acquire(ctx)
+	if err == nil {
+		t.Fatal("expected error from cancelled context")
+	}
+	if err != context.Canceled {
+		t.Fatalf("expected context.Canceled, got: %v", err)
+	}
+
+	// Release and verify we can acquire again.
+	sem.Release()
+	if err := sem.Acquire(context.Background()); err != nil {
+		t.Fatalf("Acquire() after release error: %v", err)
+	}
+}
+
+func TestSemaphoreAcquireContextTimeout(t *testing.T) {
+	sem := NewSemaphore(1)
+
+	// Fill the semaphore.
+	if err := sem.Acquire(context.Background()); err != nil {
+		t.Fatalf("Acquire() error: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	err := sem.Acquire(ctx)
+	if err == nil {
+		t.Fatal("expected error from timed-out context")
+	}
+}
+
+func TestSemaphoreResize(t *testing.T) {
+	sem := NewSemaphore(2)
+
+	if err := sem.Acquire(context.Background()); err != nil {
+		t.Fatalf("Acquire() error: %v", err)
+	}
+	if err := sem.Acquire(context.Background()); err != nil {
+		t.Fatalf("Acquire() error: %v", err)
+	}
+
+	// Semaphore full — resize to 4.
+	sem.Resize(4)
+
+	if sem.Available() != 2 {
+		t.Fatalf("Available() = %d after resize to 4, want 2", sem.Available())
+	}
+	if sem.Max() != 4 {
+		t.Fatalf("Max() = %d after resize, want 4", sem.Max())
+	}
+
+	// Should be able to acquire 2 more.
+	if err := sem.Acquire(context.Background()); err != nil {
+		t.Fatalf("Acquire() after resize error: %v", err)
+	}
+	if err := sem.Acquire(context.Background()); err != nil {
+		t.Fatalf("Acquire() after resize error: %v", err)
+	}
+	if sem.Available() != 0 {
+		t.Fatalf("Available() = %d, want 0", sem.Available())
+	}
+}
+
 func TestSemaphoreConcurrency(t *testing.T) {
 	sem := NewSemaphore(3)
 	var wg sync.WaitGroup
@@ -66,7 +146,9 @@ func TestSemaphoreConcurrency(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			sem.Acquire()
+			if err := sem.Acquire(context.Background()); err != nil {
+				return
+			}
 			active <- 1
 			time.Sleep(time.Millisecond)
 			active <- -1

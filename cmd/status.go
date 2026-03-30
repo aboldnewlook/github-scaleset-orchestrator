@@ -28,7 +28,7 @@ func init() {
 
 func runStatus(cmd *cobra.Command, args []string) error {
 	// Try live status from daemon first
-	client, err := control.Connect(remoteAddr)
+	client, err := connectClient(remoteAddr)
 	if err == nil {
 		defer func() { _ = client.Close() }()
 		result, err := client.Call(context.Background(), control.MethodLiveStatus, nil)

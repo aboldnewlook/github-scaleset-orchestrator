@@ -13,6 +13,7 @@ import (
 
 	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/config"
 	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/event"
+	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/naming"
 	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/runner"
 	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/scaler"
 	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/service"
@@ -20,14 +21,12 @@ import (
 	"github.com/actions/scaleset/listener"
 )
 
-const scaleSetNamePrefix = "gso"
-
 // Orchestrator manages scale sets and listeners for multiple repos.
 type Orchestrator struct {
 	cfg    *config.Config
 	logger *slog.Logger
 	bus    *event.Bus // may be nil
-	sem    scaler.Semaphore
+	sem    *scaler.Semaphore
 
 	mu      sync.Mutex
 	scalers map[string]*scaler.Scaler // keyed by repo name
@@ -55,7 +54,7 @@ func (o *Orchestrator) RunnersByRepo() map[string][]string {
 }
 
 // Semaphore returns the orchestrator's semaphore for capacity queries.
-func (o *Orchestrator) Semaphore() scaler.Semaphore {
+func (o *Orchestrator) Semaphore() *scaler.Semaphore {
 	return o.sem
 }
 
@@ -75,9 +74,10 @@ func (o *Orchestrator) AvailableSlots() int {
 // SetMaxRunners updates the concurrency cap at runtime.
 // Note: this does not persist across restarts.
 func (o *Orchestrator) SetMaxRunners(count int) error {
-	// We cannot resize a channel, so this is a best-effort approach.
-	// For now, update the config value used by new listeners.
 	o.cfg.MaxRunners = count
+	if o.sem != nil {
+		o.sem.Resize(count)
+	}
 	return nil
 }
 
@@ -174,7 +174,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	return nil
 }
 
-func (o *Orchestrator) runRepo(ctx context.Context, repo config.Repo, hostname string, worker *runner.Worker, sem scaler.Semaphore) error {
+func (o *Orchestrator) runRepo(ctx context.Context, repo config.Repo, hostname string, worker *runner.Worker, sem *scaler.Semaphore) error {
 	logger := o.logger.With("repo", repo.Name)
 	logger.Info("starting listener")
 
@@ -192,7 +192,7 @@ func (o *Orchestrator) runRepo(ctx context.Context, repo config.Repo, hostname s
 	labels = append(labels, scaleset.Label{Name: archLabel()})
 
 	// Create or get scale set
-	scaleSetName := fmt.Sprintf("%s-%s-%s", scaleSetNamePrefix, hostname, repoShortName(repo.Name))
+	scaleSetName := naming.ScaleSetName(naming.ScaleSetNamePrefix, hostname, repo.Name)
 
 	ss, err := client.GetRunnerScaleSet(ctx, 1, scaleSetName)
 	if err != nil || ss == nil {
@@ -292,14 +292,6 @@ func (o *Orchestrator) publish(e event.Event) {
 func mustMarshal(v any) json.RawMessage {
 	data, _ := json.Marshal(v)
 	return data
-}
-
-func repoShortName(repo string) string {
-	parts := strings.Split(repo, "/")
-	if len(parts) == 2 {
-		return parts[1]
-	}
-	return repo
 }
 
 func osLabel() string {

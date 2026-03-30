@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"context"
 	"log/slog"
 	"os"
 	"runtime"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/config"
 	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/event"
+	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/naming"
 	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/scaler"
 )
 
@@ -74,7 +76,9 @@ func TestAvailableSlots_WithSemaphore(t *testing.T) {
 		t.Fatalf("AvailableSlots() = %d, want 4", o.AvailableSlots())
 	}
 
-	o.sem.Acquire()
+	if err := o.sem.Acquire(context.Background()); err != nil {
+		t.Fatalf("Acquire() error: %v", err)
+	}
 	if o.AvailableSlots() != 3 {
 		t.Fatalf("AvailableSlots() = %d after acquire, want 3", o.AvailableSlots())
 	}
@@ -88,12 +92,17 @@ func TestAvailableSlots_WithSemaphore(t *testing.T) {
 func TestSetMaxRunners(t *testing.T) {
 	cfg := &config.Config{MaxRunners: 4}
 	o := New(cfg, testLogger(), nil)
+	o.sem = scaler.NewSemaphore(4)
 
 	if err := o.SetMaxRunners(8); err != nil {
 		t.Fatalf("SetMaxRunners(8) error: %v", err)
 	}
 	if o.cfg.MaxRunners != 8 {
 		t.Fatalf("MaxRunners = %d after SetMaxRunners(8), want 8", o.cfg.MaxRunners)
+	}
+	// Verify the semaphore was actually resized.
+	if o.sem.Available() != 8 {
+		t.Fatalf("sem.Available() = %d after SetMaxRunners(8), want 8", o.sem.Available())
 	}
 }
 
@@ -181,9 +190,9 @@ func TestRepoShortName(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
-			got := repoShortName(tt.input)
+			got := naming.RepoShortName(tt.input)
 			if got != tt.want {
-				t.Fatalf("repoShortName(%q) = %q, want %q", tt.input, got, tt.want)
+				t.Fatalf("RepoShortName(%q) = %q, want %q", tt.input, got, tt.want)
 			}
 		})
 	}

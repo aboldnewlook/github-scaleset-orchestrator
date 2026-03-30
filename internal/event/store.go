@@ -8,6 +8,9 @@ import (
 	"time"
 )
 
+// DefaultMaxStoreSize is the default maximum file size before rotation (10 MB).
+const DefaultMaxStoreSize int64 = 10 * 1024 * 1024
+
 // StoreFilter controls which events are returned by Query.
 type StoreFilter struct {
 	Since time.Time
@@ -15,22 +18,40 @@ type StoreFilter struct {
 	Repo  string
 }
 
-// FileStore is an append-only JSONL file store for events.
+// FileStore is an append-only JSONL file store for events with size-based
+// rotation. When the current file exceeds maxSize, it is renamed to
+// <path>.1 and a fresh file is created. At most one rotated file is kept.
 type FileStore struct {
-	mu   sync.Mutex
-	path string
+	mu      sync.Mutex
+	path    string
+	maxSize int64
 }
 
 // NewFileStore creates a new FileStore that writes to path. The file is
-// created on first Append if it does not exist.
+// created on first Append if it does not exist. Log rotation occurs when
+// the file exceeds DefaultMaxStoreSize.
 func NewFileStore(path string) *FileStore {
-	return &FileStore{path: path}
+	return &FileStore{path: path, maxSize: DefaultMaxStoreSize}
 }
 
-// Append writes a single event as one JSON line.
+// NewFileStoreWithMaxSize creates a new FileStore with a custom maximum file
+// size in bytes. When the file exceeds this size, it is rotated.
+func NewFileStoreWithMaxSize(path string, maxSize int64) *FileStore {
+	if maxSize <= 0 {
+		maxSize = DefaultMaxStoreSize
+	}
+	return &FileStore{path: path, maxSize: maxSize}
+}
+
+// Append writes a single event as one JSON line. If the current file
+// exceeds the configured maximum size, it is rotated before writing.
 func (s *FileStore) Append(e Event) (err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if err := s.rotateIfNeeded(); err != nil {
+		return err
+	}
 
 	f, err := os.OpenFile(s.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
@@ -51,13 +72,37 @@ func (s *FileStore) Append(e Event) (err error) {
 	return err
 }
 
+// rotateIfNeeded checks the current file size and rotates if it exceeds
+// maxSize. Must be called with s.mu held.
+func (s *FileStore) rotateIfNeeded() error {
+	info, err := os.Stat(s.path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+
+	if info.Size() <= s.maxSize {
+		return nil
+	}
+
+	rotated := s.path + ".1"
+	return os.Rename(s.path, rotated)
+}
+
 // Query reads back events that match filter. An empty filter returns all
-// events.
+// events. Only the current (non-rotated) file is searched.
 func (s *FileStore) Query(filter StoreFilter) ([]Event, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	f, err := os.Open(s.path)
+	return s.queryFile(s.path, filter)
+}
+
+// queryFile reads events from a single file that match the filter.
+func (s *FileStore) queryFile(path string, filter StoreFilter) ([]Event, error) {
+	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil

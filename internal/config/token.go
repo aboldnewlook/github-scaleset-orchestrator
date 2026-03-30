@@ -41,6 +41,11 @@ func (ts *TokenSource) Resolve() (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("reading token file %q: %w", ts.File, err)
 		}
+		if info, statErr := os.Stat(ts.File); statErr == nil {
+			if perm := info.Mode().Perm(); perm&0077 != 0 {
+				fmt.Fprintf(os.Stderr, "warning: token file %s has permissions %04o, should be 0600 or stricter\n", ts.File, perm)
+			}
+		}
 		token := strings.TrimSpace(string(data))
 		if token != "" {
 			return token, nil

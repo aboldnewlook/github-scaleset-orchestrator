@@ -16,15 +16,81 @@ import (
 )
 
 // Semaphore controls global concurrency across all repos.
-type Semaphore chan struct{}
-
-func NewSemaphore(size int) Semaphore {
-	return make(chan struct{}, size)
+// It supports context-aware Acquire and runtime Resize.
+type Semaphore struct {
+	mu      sync.Mutex
+	cond    *sync.Cond
+	max     int
+	current int
 }
 
-func (s Semaphore) Acquire()       { s <- struct{}{} }
-func (s Semaphore) Release()       { <-s }
-func (s Semaphore) Available() int { return cap(s) - len(s) }
+func NewSemaphore(size int) *Semaphore {
+	s := &Semaphore{max: size}
+	s.cond = sync.NewCond(&s.mu)
+	return s
+}
+
+// Acquire blocks until a slot is available or ctx is cancelled.
+func (s *Semaphore) Acquire(ctx context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Watch for context cancellation in a goroutine to wake us up.
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+			s.cond.Broadcast()
+		case <-done:
+		}
+	}()
+
+	for s.current >= s.max {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		s.cond.Wait()
+	}
+
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+
+	s.current++
+	return nil
+}
+
+// Release frees a semaphore slot.
+func (s *Semaphore) Release() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.current--
+	s.cond.Signal()
+}
+
+// Available returns the number of free slots.
+func (s *Semaphore) Available() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.max - s.current
+}
+
+// Resize changes the maximum capacity of the semaphore at runtime.
+func (s *Semaphore) Resize(newMax int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.max = newMax
+	// Wake all waiters so they can re-check against the new max.
+	s.cond.Broadcast()
+}
+
+// Max returns the current maximum capacity.
+func (s *Semaphore) Max() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.max
+}
 
 // Scaler implements the scaleset/listener.Scaler interface.
 // One Scaler is created per repo.
@@ -33,7 +99,7 @@ type Scaler struct {
 	scaleSetID int
 	client     *scaleset.Client
 	worker     *runner.Worker
-	sem        Semaphore
+	sem        *Semaphore
 	logger     *slog.Logger
 	bus        *event.Bus // may be nil
 
@@ -41,7 +107,7 @@ type Scaler struct {
 	runners map[string]context.CancelFunc // name -> cancel
 }
 
-func New(repo string, scaleSetID int, client *scaleset.Client, worker *runner.Worker, sem Semaphore, logger *slog.Logger, bus *event.Bus) *Scaler {
+func New(repo string, scaleSetID int, client *scaleset.Client, worker *runner.Worker, sem *Semaphore, logger *slog.Logger, bus *event.Bus) *Scaler {
 	return &Scaler{
 		repo:       repo,
 		scaleSetID: scaleSetID,
@@ -169,7 +235,9 @@ func (s *Scaler) startRunner(ctx context.Context) error {
 		return fmt.Errorf("generating jit config: %w", err)
 	}
 
-	s.sem.Acquire()
+	if err := s.sem.Acquire(ctx); err != nil {
+		return fmt.Errorf("acquiring semaphore: %w", err)
+	}
 
 	runnerCtx, cancel := context.WithCancel(ctx)
 

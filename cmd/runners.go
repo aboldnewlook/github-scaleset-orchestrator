@@ -56,7 +56,7 @@ func init() {
 
 func runRunnerList(cmd *cobra.Command, args []string) error {
 	// Try live status from daemon first
-	client, err := control.Connect(remoteAddr)
+	client, err := connectClient(remoteAddr)
 	if err == nil {
 		defer func() { _ = client.Close() }()
 		result, err := client.Call(context.Background(), control.MethodLiveStatus, nil)
@@ -125,7 +125,7 @@ func printLiveRunners(live *control.LiveStatusResult, repoFilter string) error {
 func runRunnerRecycle(cmd *cobra.Command, args []string) error {
 	name := args[0]
 
-	client, err := control.Connect(remoteAddr)
+	client, err := connectClient(remoteAddr)
 	if err != nil {
 		return fmt.Errorf("%w (is the daemon running?)", err)
 	}

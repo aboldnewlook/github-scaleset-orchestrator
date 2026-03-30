@@ -19,6 +19,9 @@ import (
 
 var (
 	listenAddr string
+	tlsCert    string
+	tlsKey     string
+	allowCIDRs []string
 	startCmd   = &cobra.Command{
 		Use:   "start",
 		Short: "Start the orchestrator daemon",
@@ -28,7 +31,10 @@ var (
 
 func init() {
 	rootCmd.AddCommand(startCmd)
-	startCmd.Flags().StringVar(&listenAddr, "listen", "", "override TCP listen address (default :9100)")
+	startCmd.Flags().StringVar(&listenAddr, "listen", "", "enable TCP control listener on address (e.g. :9100), requires GSO_CONTROL_TOKEN")
+	startCmd.Flags().StringVar(&tlsCert, "tls-cert", "", "path to TLS certificate PEM (overrides auto-generated)")
+	startCmd.Flags().StringVar(&tlsKey, "tls-key", "", "path to TLS private key PEM (overrides auto-generated)")
+	startCmd.Flags().StringSliceVar(&allowCIDRs, "allow-cidr", nil, "allowed CIDR for TCP connections (repeatable)")
 }
 
 func runStart(cmd *cobra.Command, args []string) error {
@@ -68,9 +74,42 @@ func runStart(cmd *cobra.Command, args []string) error {
 	socketPath := control.SocketPath()
 
 	var serverOpts []control.ServerOption
+
+	// Merge CLI flags with config (CLI wins).
+	tcpAddr := cfg.Control.Listen
 	if listenAddr != "" {
-		serverOpts = append(serverOpts, control.WithTCPAddr(listenAddr))
+		tcpAddr = listenAddr
 	}
+	if tcpAddr != "" {
+		serverOpts = append(serverOpts, control.WithTCPAddr(tcpAddr))
+	}
+
+	// TLS cert: CLI flags override config.
+	certPath := cfg.Control.TLSCert
+	keyPath := cfg.Control.TLSKey
+	if tlsCert != "" {
+		certPath = tlsCert
+	}
+	if tlsKey != "" {
+		keyPath = tlsKey
+	}
+	if certPath != "" && keyPath != "" {
+		tlsCfg, fp, err := control.LoadOrGenerateTLSConfig(certPath, keyPath, logger)
+		if err != nil {
+			return fmt.Errorf("loading TLS cert: %w", err)
+		}
+		serverOpts = append(serverOpts, control.WithTLSConfig(tlsCfg, fp))
+	}
+
+	// IP allowlist: CLI flags override config.
+	cidrs := cfg.Control.AllowCIDRs
+	if len(allowCIDRs) > 0 {
+		cidrs = allowCIDRs
+	}
+	if len(cidrs) > 0 {
+		serverOpts = append(serverOpts, control.WithAllowCIDRs(cidrs))
+	}
+
 	ctrlServer := control.NewServer(socketPath, runtime, logger, serverOpts...)
 
 	go func() {

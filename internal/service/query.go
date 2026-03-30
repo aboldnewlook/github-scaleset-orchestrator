@@ -10,10 +10,9 @@ import (
 	"strings"
 
 	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/config"
+	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/naming"
 	"github.com/actions/scaleset"
 )
-
-const scaleSetNamePrefix = "gso"
 
 // Query is a stateless service that creates scaleset clients on demand
 // and queries GitHub for runner/scale-set information.
@@ -66,7 +65,7 @@ func (q *Query) Status(ctx context.Context, repoFilter string) (*StatusResult, e
 			continue
 		}
 
-		scaleSetName := fmt.Sprintf("%s-%s-%s", scaleSetNamePrefix, hostname, repoShortName(repo.Name))
+		scaleSetName := naming.ScaleSetName(naming.ScaleSetNamePrefix, hostname, repo.Name)
 		ss, err := client.GetRunnerScaleSet(ctx, 1, scaleSetName)
 		if err != nil {
 			rs.Error = err.Error()
@@ -113,7 +112,7 @@ func (q *Query) ScaleSets(ctx context.Context, repoFilter string) ([]ScaleSetInf
 			continue
 		}
 
-		scaleSetName := fmt.Sprintf("%s-%s-%s", scaleSetNamePrefix, hostname, repoShortName(repo.Name))
+		scaleSetName := naming.ScaleSetName(naming.ScaleSetNamePrefix, hostname, repo.Name)
 		ss, err := client.GetRunnerScaleSet(ctx, 1, scaleSetName)
 		if err != nil || ss == nil {
 			continue
@@ -207,7 +206,7 @@ func (q *Query) Health(ctx context.Context) (*HealthResult, error) {
 			continue
 		}
 
-		scaleSetName := fmt.Sprintf("%s-%s-%s", scaleSetNamePrefix, hostname, repoShortName(repo.Name))
+		scaleSetName := naming.ScaleSetName(naming.ScaleSetNamePrefix, hostname, repo.Name)
 		_, err = client.GetRunnerScaleSet(ctx, 1, scaleSetName)
 		if err != nil {
 			rh.Error = err.Error()
@@ -263,12 +262,4 @@ func (q *Query) findRepo(name string) (config.Repo, error) {
 		}
 	}
 	return config.Repo{}, fmt.Errorf("repo %q not found in configuration", name)
-}
-
-func repoShortName(repo string) string {
-	parts := strings.Split(repo, "/")
-	if len(parts) == 2 {
-		return parts[1]
-	}
-	return repo
 }

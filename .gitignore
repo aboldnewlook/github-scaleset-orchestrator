@@ -1,3 +1,5 @@
 config.yaml
 *.env
 gso
+coverage.out
+golangci-lint-report.json

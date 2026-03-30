@@ -503,6 +503,85 @@ func TestLoadReposWithPerRepoToken(t *testing.T) {
 	}
 }
 
+func TestLoadControlConfig(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+
+	yaml := `
+auth:
+  env: GITHUB_TOKEN
+repos:
+  - name: org/repo
+control:
+  listen: ":9100"
+  tls_cert: /path/to/cert.pem
+  tls_key: /path/to/key.pem
+  allow_cidrs:
+    - 192.168.1.0/24
+    - 10.0.0.0/8
+`
+	if err := os.WriteFile(cfgPath, []byte(yaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+
+	if cfg.Control.Listen != ":9100" {
+		t.Fatalf("expected control.listen :9100, got %q", cfg.Control.Listen)
+	}
+	if cfg.Control.TLSCert != "/path/to/cert.pem" {
+		t.Fatalf("expected control.tls_cert /path/to/cert.pem, got %q", cfg.Control.TLSCert)
+	}
+	if cfg.Control.TLSKey != "/path/to/key.pem" {
+		t.Fatalf("expected control.tls_key /path/to/key.pem, got %q", cfg.Control.TLSKey)
+	}
+	if len(cfg.Control.AllowCIDRs) != 2 {
+		t.Fatalf("expected 2 allow_cidrs, got %d", len(cfg.Control.AllowCIDRs))
+	}
+	if cfg.Control.AllowCIDRs[0] != "192.168.1.0/24" {
+		t.Fatalf("expected first CIDR 192.168.1.0/24, got %q", cfg.Control.AllowCIDRs[0])
+	}
+	if cfg.Control.AllowCIDRs[1] != "10.0.0.0/8" {
+		t.Fatalf("expected second CIDR 10.0.0.0/8, got %q", cfg.Control.AllowCIDRs[1])
+	}
+}
+
+func TestLoadControlConfigFromEnv(t *testing.T) {
+	t.Setenv("GSO_AUTH_ENV", "GITHUB_TOKEN")
+	t.Setenv("GSO_REPOS", `[{"name":"org/repo"}]`)
+	t.Setenv("GSO_CONTROL_LISTEN", ":9200")
+	t.Setenv("GSO_CONTROL_TLS_CERT", "/env/cert.pem")
+	t.Setenv("GSO_CONTROL_TLS_KEY", "/env/key.pem")
+	t.Setenv("GSO_CONTROL_ALLOW_CIDRS", "10.0.0.0/8, 172.16.0.0/12")
+
+	cfg, err := Load("/nonexistent/config.yaml")
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+
+	if cfg.Control.Listen != ":9200" {
+		t.Fatalf("expected control.listen :9200, got %q", cfg.Control.Listen)
+	}
+	if cfg.Control.TLSCert != "/env/cert.pem" {
+		t.Fatalf("expected control.tls_cert /env/cert.pem, got %q", cfg.Control.TLSCert)
+	}
+	if cfg.Control.TLSKey != "/env/key.pem" {
+		t.Fatalf("expected control.tls_key /env/key.pem, got %q", cfg.Control.TLSKey)
+	}
+	if len(cfg.Control.AllowCIDRs) != 2 {
+		t.Fatalf("expected 2 allow_cidrs, got %d", len(cfg.Control.AllowCIDRs))
+	}
+	if cfg.Control.AllowCIDRs[0] != "10.0.0.0/8" {
+		t.Fatalf("expected first CIDR 10.0.0.0/8, got %q", cfg.Control.AllowCIDRs[0])
+	}
+	if cfg.Control.AllowCIDRs[1] != "172.16.0.0/12" {
+		t.Fatalf("expected second CIDR 172.16.0.0/12, got %q", cfg.Control.AllowCIDRs[1])
+	}
+}
+
 func containsSubstr(s, sub string) bool {
 	return len(s) >= len(sub) && searchStr(s, sub)
 }

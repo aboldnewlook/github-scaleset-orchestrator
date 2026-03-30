@@ -59,7 +59,7 @@ func TestNewManager_NestedDir(t *testing.T) {
 
 func TestVerifyCached(t *testing.T) {
 	dir := t.TempDir()
-	mgr := &Manager{cacheDir: dir, logger: testLogger()}
+	mgr := &Manager{cacheDir: dir, logger: testLogger(), httpClient: &http.Client{}}
 
 	versionDir := filepath.Join(dir, "runner-2.320.0")
 	checksumFile := filepath.Join(versionDir, ".sha256")
@@ -129,7 +129,7 @@ func TestVerifyCached(t *testing.T) {
 
 func TestVerifyCached_MissingRunScript(t *testing.T) {
 	dir := t.TempDir()
-	mgr := &Manager{cacheDir: dir, logger: testLogger()}
+	mgr := &Manager{cacheDir: dir, logger: testLogger(), httpClient: &http.Client{}}
 
 	versionDir := filepath.Join(dir, "runner-missing")
 	if err := os.MkdirAll(versionDir, 0o755); err != nil {
@@ -144,7 +144,7 @@ func TestVerifyCached_MissingRunScript(t *testing.T) {
 
 func TestVerifyCached_MissingChecksumFile(t *testing.T) {
 	dir := t.TempDir()
-	mgr := &Manager{cacheDir: dir, logger: testLogger()}
+	mgr := &Manager{cacheDir: dir, logger: testLogger(), httpClient: &http.Client{}}
 
 	versionDir := filepath.Join(dir, "runner-nosum")
 	if err := os.MkdirAll(versionDir, 0o755); err != nil {
@@ -231,7 +231,7 @@ func TestLatestRelease(t *testing.T) {
 	defer func() { http.DefaultTransport = origTransport }()
 
 	dir := t.TempDir()
-	mgr := &Manager{cacheDir: dir, logger: testLogger()}
+	mgr := &Manager{cacheDir: dir, logger: testLogger(), httpClient: &http.Client{}}
 
 	rel, err := mgr.latestRelease(context.Background())
 	if err != nil {
@@ -290,7 +290,7 @@ func TestLatestRelease_NoMatchingAsset(t *testing.T) {
 	defer func() { http.DefaultTransport = origTransport }()
 
 	dir := t.TempDir()
-	mgr := &Manager{cacheDir: dir, logger: testLogger()}
+	mgr := &Manager{cacheDir: dir, logger: testLogger(), httpClient: &http.Client{}}
 
 	// On non-Windows with non-x64, there might not be a matching asset.
 	// This test verifies the error path when no matching tarball is found.
@@ -332,7 +332,7 @@ func TestLatestRelease_BadJSON(t *testing.T) {
 	defer func() { http.DefaultTransport = origTransport }()
 
 	dir := t.TempDir()
-	mgr := &Manager{cacheDir: dir, logger: testLogger()}
+	mgr := &Manager{cacheDir: dir, logger: testLogger(), httpClient: &http.Client{}}
 
 	_, err := mgr.latestRelease(context.Background())
 	if err == nil {
@@ -356,7 +356,7 @@ func TestLatestRelease_ServerError(t *testing.T) {
 	defer func() { http.DefaultTransport = origTransport }()
 
 	dir := t.TempDir()
-	mgr := &Manager{cacheDir: dir, logger: testLogger()}
+	mgr := &Manager{cacheDir: dir, logger: testLogger(), httpClient: &http.Client{}}
 
 	_, err := mgr.latestRelease(context.Background())
 	if err == nil {
@@ -491,7 +491,7 @@ func TestFetchChecksum(t *testing.T) {
 			defer server.Close()
 
 			dir := t.TempDir()
-			mgr := &Manager{cacheDir: dir, logger: testLogger()}
+			mgr := &Manager{cacheDir: dir, logger: testLogger(), httpClient: &http.Client{}}
 
 			hash, err := mgr.fetchChecksum(context.Background(), server.URL)
 			if tt.wantErr {
@@ -522,7 +522,7 @@ func TestDownload_ChecksumMismatch(t *testing.T) {
 	dest := filepath.Join(dir, "runner")
 	checksumFile := filepath.Join(dest, ".sha256")
 
-	mgr := &Manager{cacheDir: dir, logger: testLogger()}
+	mgr := &Manager{cacheDir: dir, logger: testLogger(), httpClient: &http.Client{}}
 
 	rel := &runnerRelease{
 		version:  "1.0.0",
@@ -549,7 +549,7 @@ func TestDownload_ServerError(t *testing.T) {
 	dest := filepath.Join(dir, "runner")
 	checksumFile := filepath.Join(dest, ".sha256")
 
-	mgr := &Manager{cacheDir: dir, logger: testLogger()}
+	mgr := &Manager{cacheDir: dir, logger: testLogger(), httpClient: &http.Client{}}
 
 	rel := &runnerRelease{
 		version: "1.0.0",

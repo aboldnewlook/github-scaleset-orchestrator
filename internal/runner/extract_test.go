@@ -27,7 +27,7 @@ func createTarGz(t *testing.T, dir string, entries []tarEntry) string {
 		if e.typeflag == tar.TypeReg {
 			hdr.Size = int64(len(e.body))
 		}
-		if e.typeflag == tar.TypeSymlink {
+		if e.typeflag == tar.TypeSymlink || e.typeflag == tar.TypeLink {
 			hdr.Linkname = e.linkname
 		}
 		if err := tw.WriteHeader(hdr); err != nil {
@@ -243,6 +243,131 @@ func TestExtractTarGz_NestedDirectories(t *testing.T) {
 	}
 	if string(data) != "deep" {
 		t.Fatalf("got %q, want %q", data, "deep")
+	}
+}
+
+func TestExtractTarGz_SymlinkAbsoluteTarget(t *testing.T) {
+	tmpDir := t.TempDir()
+	destDir := filepath.Join(tmpDir, "out")
+	if err := os.MkdirAll(destDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	archive := createTarGz(t, tmpDir, []tarEntry{
+		{name: "link.txt", mode: 0o644, typeflag: tar.TypeSymlink, linkname: "/etc/passwd"},
+	})
+
+	err := extractTarGz(archive, destDir)
+	if err == nil {
+		t.Fatal("expected error for absolute symlink target")
+	}
+	if !containsStr(err.Error(), "illegal symlink target") {
+		t.Fatalf("expected 'illegal symlink target' error, got: %v", err)
+	}
+}
+
+func TestExtractTarGz_SymlinkRelativeEscape(t *testing.T) {
+	tmpDir := t.TempDir()
+	destDir := filepath.Join(tmpDir, "out")
+	if err := os.MkdirAll(destDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	archive := createTarGz(t, tmpDir, []tarEntry{
+		{name: "link.txt", mode: 0o644, typeflag: tar.TypeSymlink, linkname: "../../../etc/shadow"},
+	})
+
+	err := extractTarGz(archive, destDir)
+	if err == nil {
+		t.Fatal("expected error for relative symlink escape")
+	}
+	if !containsStr(err.Error(), "illegal symlink target") {
+		t.Fatalf("expected 'illegal symlink target' error, got: %v", err)
+	}
+}
+
+func TestExtractTarGz_SymlinkValidRelative(t *testing.T) {
+	tmpDir := t.TempDir()
+	destDir := filepath.Join(tmpDir, "out")
+	if err := os.MkdirAll(destDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	archive := createTarGz(t, tmpDir, []tarEntry{
+		{name: "subdir/", mode: 0o755, typeflag: tar.TypeDir},
+		{name: "subdir/target.txt", mode: 0o644, typeflag: tar.TypeReg, body: "hello"},
+		{name: "subdir/link.txt", mode: 0o644, typeflag: tar.TypeSymlink, linkname: "target.txt"},
+	})
+
+	if err := extractTarGz(archive, destDir); err != nil {
+		t.Fatalf("extractTarGz() error: %v", err)
+	}
+
+	linkTarget, err := os.Readlink(filepath.Join(destDir, "subdir", "link.txt"))
+	if err != nil {
+		t.Fatalf("reading symlink: %v", err)
+	}
+	if linkTarget != "target.txt" {
+		t.Fatalf("symlink target = %q, want %q", linkTarget, "target.txt")
+	}
+}
+
+func TestExtractTarGz_HardlinkEscape(t *testing.T) {
+	tmpDir := t.TempDir()
+	destDir := filepath.Join(tmpDir, "out")
+	if err := os.MkdirAll(destDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	archive := createTarGz(t, tmpDir, []tarEntry{
+		{name: "evil.txt", mode: 0o644, typeflag: tar.TypeLink, linkname: "../../../etc/passwd"},
+	})
+
+	err := extractTarGz(archive, destDir)
+	if err == nil {
+		t.Fatal("expected error for hardlink escape")
+	}
+	if !containsStr(err.Error(), "illegal hardlink target") {
+		t.Fatalf("expected 'illegal hardlink target' error, got: %v", err)
+	}
+}
+
+func TestExtractTarGz_HardlinkValid(t *testing.T) {
+	tmpDir := t.TempDir()
+	destDir := filepath.Join(tmpDir, "out")
+	if err := os.MkdirAll(destDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	archive := createTarGz(t, tmpDir, []tarEntry{
+		{name: "original.txt", mode: 0o644, typeflag: tar.TypeReg, body: "hello"},
+		{name: "hardlink.txt", mode: 0o644, typeflag: tar.TypeLink, linkname: "original.txt"},
+	})
+
+	if err := extractTarGz(archive, destDir); err != nil {
+		t.Fatalf("extractTarGz() error: %v", err)
+	}
+
+	// Verify both files exist with the same content.
+	data, err := os.ReadFile(filepath.Join(destDir, "hardlink.txt"))
+	if err != nil {
+		t.Fatalf("reading hardlink: %v", err)
+	}
+	if string(data) != "hello" {
+		t.Fatalf("hardlink content = %q, want %q", data, "hello")
+	}
+
+	// Verify they share the same inode (are actual hardlinks).
+	origInfo, err := os.Stat(filepath.Join(destDir, "original.txt"))
+	if err != nil {
+		t.Fatalf("stat original: %v", err)
+	}
+	linkInfo, err := os.Stat(filepath.Join(destDir, "hardlink.txt"))
+	if err != nil {
+		t.Fatalf("stat hardlink: %v", err)
+	}
+	if !os.SameFile(origInfo, linkInfo) {
+		t.Fatal("expected hardlink.txt to be a hardlink to original.txt")
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 
 	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/control"
 	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/event"
+	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/naming"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -21,6 +22,18 @@ const (
 
 // tickMsg fires periodically to refresh status and poll events.
 type tickMsg time.Time
+
+// liveStatusMsg is the async result of fetching live status from the daemon.
+type liveStatusMsg struct {
+	status *control.LiveStatusResult
+	err    error
+}
+
+// eventsMsg is the async result of polling for new events.
+type eventsMsg struct {
+	events []event.Event
+	err    error
+}
 
 const runnerLingerDuration = 10 * time.Second
 
@@ -39,7 +52,8 @@ type RunnerState struct {
 // the JSONL event store for live updates.
 type Model struct {
 	store      *event.FileStore
-	remoteAddr string // TCP address for remote daemon; empty = local Unix socket
+	remoteAddr string                 // TCP address for remote daemon; empty = local Unix socket
+	clientOpts []control.ClientOption // TLS options for remote connections
 
 	events   []event.Event
 	lastTime time.Time // timestamp of last event seen, for polling new ones
@@ -58,19 +72,17 @@ type Model struct {
 // New creates a new TUI model that attaches to a running daemon.
 // If remoteAddr is non-empty, the TUI connects via TCP instead of the
 // local Unix socket.
-func New(store *event.FileStore, remoteAddr string) Model {
+func New(store *event.FileStore, remoteAddr string, clientOpts ...control.ClientOption) Model {
 	m := Model{
 		store:      store,
 		remoteAddr: remoteAddr,
+		clientOpts: clientOpts,
 		events:     make([]event.Event, 0, maxEvents),
 		width:      80,
 		height:     24,
 		startTime:  time.Now(),
 		runners:    make(map[string]*RunnerState),
 	}
-
-	// Get initial live status
-	m.refreshLiveStatus()
 
 	// Load events since daemon started (look for most recent daemon.started event)
 	if store != nil {
@@ -103,9 +115,13 @@ func New(store *event.FileStore, remoteAddr string) Model {
 	return m
 }
 
-// Init starts the periodic refresh ticker.
+// Init starts the periodic refresh ticker and kicks off the first async fetch.
 func (m Model) Init() tea.Cmd {
-	return m.tickCmd()
+	return tea.Batch(
+		m.fetchLiveStatusCmd,
+		m.fetchEventsCmd,
+		m.tickCmd(),
+	)
 }
 
 // Update handles messages.
@@ -126,45 +142,68 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tickMsg:
-		m.refreshLiveStatus()
-		m.pollNewEvents()
-		return m, m.tickCmd()
+		return m, tea.Batch(
+			m.fetchLiveStatusCmd,
+			m.fetchEventsCmd,
+			m.tickCmd(),
+		)
+
+	case liveStatusMsg:
+		if msg.err != nil {
+			m.daemonErr = "daemon not running"
+			m.liveStatus = nil
+		} else {
+			m.daemonErr = ""
+			m.liveStatus = msg.status
+		}
+		return m, nil
+
+	case eventsMsg:
+		if msg.err != nil || len(msg.events) == 0 {
+			return m, nil
+		}
+		for _, e := range msg.events {
+			if !e.Time.After(m.lastTime) {
+				continue
+			}
+			if len(m.events) >= maxEvents {
+				m.events = m.events[1:]
+			}
+			m.events = append(m.events, e)
+			m.updateRunnerState(e)
+			if e.Time.After(m.lastTime) {
+				m.lastTime = e.Time
+			}
+		}
+		return m, nil
 	}
 
 	return m, nil
 }
 
-// refreshLiveStatus queries the daemon via control socket or TCP.
-func (m *Model) refreshLiveStatus() {
-	client, err := control.Connect(m.remoteAddr)
+// fetchLiveStatusCmd is a tea.Cmd that queries the daemon asynchronously.
+func (m Model) fetchLiveStatusCmd() tea.Msg {
+	client, err := control.Connect(m.remoteAddr, m.clientOpts...)
 	if err != nil {
-		m.daemonErr = "daemon not running"
-		m.liveStatus = nil
-		return
+		return liveStatusMsg{err: fmt.Errorf("daemon not running")}
 	}
 	defer func() { _ = client.Close() }()
 
 	result, err := client.Call(context.Background(), control.MethodLiveStatus, nil)
 	if err != nil {
-		m.daemonErr = err.Error()
-		m.liveStatus = nil
-		return
+		return liveStatusMsg{err: err}
 	}
 
 	var status control.LiveStatusResult
 	if err := json.Unmarshal(result, &status); err != nil {
-		m.daemonErr = err.Error()
-		m.liveStatus = nil
-		return
+		return liveStatusMsg{err: err}
 	}
 
-	m.daemonErr = ""
-	m.liveStatus = &status
+	return liveStatusMsg{status: &status}
 }
 
-// pollNewEvents reads new events from the JSONL store (local) or via
-// the live_events control method (remote).
-func (m *Model) pollNewEvents() {
+// fetchEventsCmd is a tea.Cmd that polls for new events asynchronously.
+func (m Model) fetchEventsCmd() tea.Msg {
 	var newEvents []event.Event
 	var err error
 
@@ -172,33 +211,13 @@ func (m *Model) pollNewEvents() {
 		newEvents, err = m.pollRemoteEvents()
 	} else if m.store != nil {
 		newEvents, err = m.pollLocalEvents()
-	} else {
-		return
 	}
 
-	if err != nil || len(newEvents) == 0 {
-		return
-	}
-
-	for _, e := range newEvents {
-		if !e.Time.After(m.lastTime) {
-			continue
-		}
-
-		if len(m.events) >= maxEvents {
-			m.events = m.events[1:]
-		}
-		m.events = append(m.events, e)
-		m.updateRunnerState(e)
-
-		if e.Time.After(m.lastTime) {
-			m.lastTime = e.Time
-		}
-	}
+	return eventsMsg{events: newEvents, err: err}
 }
 
 // pollLocalEvents reads from the local JSONL store.
-func (m *Model) pollLocalEvents() ([]event.Event, error) {
+func (m Model) pollLocalEvents() ([]event.Event, error) {
 	since := m.lastTime
 	if since.IsZero() {
 		since = time.Now().Add(-1 * time.Hour)
@@ -207,8 +226,8 @@ func (m *Model) pollLocalEvents() ([]event.Event, error) {
 }
 
 // pollRemoteEvents fetches events from the daemon via the control socket.
-func (m *Model) pollRemoteEvents() ([]event.Event, error) {
-	client, err := control.Connect(m.remoteAddr)
+func (m Model) pollRemoteEvents() ([]event.Event, error) {
+	client, err := control.Connect(m.remoteAddr, m.clientOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -509,7 +528,7 @@ func (m Model) renderActiveRunners(w int) string {
 	for _, name := range names {
 		rs := m.runners[name]
 		displayName := truncate(name, w/2)
-		repoShort := repoShortName(rs.Repo)
+		repoShort := naming.RepoShortName(rs.Repo)
 
 		nameLine := " " + runnerNameStyle.Render(displayName) + "  " + runnerRepoStyle.Render(repoShort)
 
@@ -580,7 +599,7 @@ func (m Model) renderEventLine(e event.Event, w int) string {
 
 	repo := ""
 	if e.Repo != "" {
-		repo = repoShortName(e.Repo)
+		repo = naming.RepoShortName(e.Repo)
 	}
 	if len(repo) > 12 {
 		repo = repo[:12]
@@ -754,14 +773,6 @@ func smartTruncateRepo(repo string, maxLen int) string {
 
 	// Just use the repo name
 	return truncate(name, maxLen)
-}
-
-func repoShortName(repo string) string {
-	parts := strings.Split(repo, "/")
-	if len(parts) == 2 {
-		return parts[1]
-	}
-	return repo
 }
 
 func truncate(s string, maxLen int) string {
