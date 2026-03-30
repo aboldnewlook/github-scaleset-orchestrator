@@ -27,13 +27,17 @@ RUN set -eux; \
     echo "Runner ${VERSION} extracted successfully"
 
 # Stage 3: Runtime image
-FROM debian:bookworm-slim
+# Ubuntu is used because the GitHub Actions runner spawns job processes
+# inside this container, and workflows expect a full Ubuntu environment.
+FROM ubuntu:24.04
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
+    curl \
+    jq \
     ca-certificates \
-    libicu72 \
-    libssl3 \
+    libicu74 \
+    libssl3t64 \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root runner user
