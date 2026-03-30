@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/aboldnewlook/github-scaleset-orchestrator/compare/v0.2.1...v0.3.0) (2026-03-30)
+
+
+### Features
+
+* enable TCP listener by default, add auth and connection logging ([f8c1766](https://github.com/aboldnewlook/github-scaleset-orchestrator/commit/f8c1766a18f20e2d1eeeafdfa3c392c8937c5f2e))
+
 ## [0.2.1](https://github.com/aboldnewlook/github-scaleset-orchestrator/compare/v0.2.0...v0.2.1) (2026-03-30)
 
 
