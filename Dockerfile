@@ -31,7 +31,6 @@ FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
-    nodejs \
     ca-certificates \
     libicu72 \
     libssl3 \
