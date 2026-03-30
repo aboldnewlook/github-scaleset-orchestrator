@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/aboldnewlook/github-scaleset-orchestrator/compare/v0.2.0...v0.2.1) (2026-03-30)
+
+
+### Reverts
+
+* switch back to ubuntu runtime image ([24dda98](https://github.com/aboldnewlook/github-scaleset-orchestrator/commit/24dda98a86e3c8f9f50538d38eb497249249a65a))
+
 ## [0.2.0](https://github.com/aboldnewlook/github-scaleset-orchestrator/compare/v0.1.0...v0.2.0) (2026-03-28)
 
 
