@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/aboldnewlook/github-scaleset-orchestrator/compare/v0.3.0...v0.4.0) (2026-03-30)
+
+
+### Features
+
+* stream events over TCP and add runner linger display ([f03fb54](https://github.com/aboldnewlook/github-scaleset-orchestrator/commit/f03fb549d184423392d1de008625666da454ac4b))
+
 ## [0.3.0](https://github.com/aboldnewlook/github-scaleset-orchestrator/compare/v0.2.1...v0.3.0) (2026-03-30)
 
 
