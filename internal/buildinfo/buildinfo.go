@@ -7,9 +7,10 @@ import (
 
 // These variables are set at build time via -ldflags.
 var (
-	Version = "dev"
-	Commit  = "unknown"
-	Date    = "unknown"
+	Version   = "dev"
+	Commit    = "unknown"
+	Date      = "unknown"
+	GoVersion = runtime.Version()
 )
 
 // String returns a human-readable build info string.
