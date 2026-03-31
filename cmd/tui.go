@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/control"
 	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/event"
 	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/tui"
 	tea "github.com/charmbracelet/bubbletea"
@@ -37,7 +38,11 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	storePath := filepath.Join(cacheDir, "gso", "events.jsonl")
 	store := event.NewFileStore(storePath)
 
-	model := tui.New(store, remoteAddr)
+	var clientOpts []control.ClientOption
+	if trustFingerprint != "" {
+		clientOpts = append(clientOpts, control.WithTrustFingerprint(trustFingerprint))
+	}
+	model := tui.New(store, remoteAddr, clientOpts...)
 	p := tea.NewProgram(model, tea.WithAltScreen())
 
 	if _, err := p.Run(); err != nil {
