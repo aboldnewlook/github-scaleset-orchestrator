@@ -489,5 +489,5 @@ func TestGeneratedCertWorksWithTLSListener(t *testing.T) {
 	if err != nil {
 		t.Fatalf("tls.Listen: %v", err)
 	}
-	ln.Close()
+	_ = ln.Close()
 }
