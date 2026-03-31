@@ -58,6 +58,7 @@ RUN useradd -m -s /bin/bash -d /home/runner runner
 RUN mkdir -p /etc/gso \
     && mkdir -p /opt/gso/cache \
     && mkdir -p /home/runner/.cache \
+    && mkdir -p /home/runner/.config/gso/tls \
     && chown -R runner:runner /home/runner \
     && chown -R runner:runner /opt/gso \
     && chown -R runner:runner /etc/gso
@@ -72,6 +73,7 @@ COPY --from=runner-dl --chown=runner:runner /opt/runner-cache/gso /home/runner/.
 
 # Set XDG_CACHE_HOME so os.UserCacheDir() resolves to /home/runner/.cache
 ENV XDG_CACHE_HOME=/home/runner/.cache
+ENV XDG_CONFIG_HOME=/home/runner/.config
 ENV HOME=/home/runner
 
 USER runner
