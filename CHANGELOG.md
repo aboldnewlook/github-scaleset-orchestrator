@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.3](https://github.com/aboldnewlook/github-scaleset-orchestrator/compare/v0.5.2...v0.5.3) (2026-03-31)
+
+
+### Bug Fixes
+
+* create .config/gso/tls directory and set XDG_CONFIG_HOME in Dockerfile ([729a659](https://github.com/aboldnewlook/github-scaleset-orchestrator/commit/729a659bfd4703ab6676c06d21fd763b824b01b4))
+
 ## [0.5.2](https://github.com/aboldnewlook/github-scaleset-orchestrator/compare/v0.5.1...v0.5.2) (2026-03-31)
 
 
