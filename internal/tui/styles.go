@@ -80,6 +80,10 @@ var (
 	stateCompleting = lipgloss.NewStyle().
 			Foreground(colorDim)
 
+	stateDone = lipgloss.NewStyle().
+			Foreground(colorDim).
+			Faint(true)
+
 	// Event log header
 	eventHeaderStyle = lipgloss.NewStyle().
 				Bold(true).

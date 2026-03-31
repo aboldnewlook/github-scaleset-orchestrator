@@ -488,7 +488,7 @@ func (m Model) renderRepoTable(w int) string {
 		sort.Slice(repos, func(i, j int) bool { return repos[i].Repo < repos[j].Repo })
 
 		for _, r := range repos {
-			runnerCount := len(r.Runners)
+			runnerCount := m.countActiveRunners(r.Repo)
 			jobCount := m.countActiveJobs(r.Repo)
 			queuedCount := m.countQueuedJobs(r.Repo)
 
@@ -532,7 +532,12 @@ func (m Model) renderActiveRunners(w int) string {
 
 		nameLine := " " + runnerNameStyle.Render(displayName) + "  " + runnerRepoStyle.Render(repoShort)
 
-		dur := time.Since(rs.SpawnedAt)
+		var dur time.Duration
+		if rs.State == "done" && !rs.CompletedAt.IsZero() {
+			dur = rs.CompletedAt.Sub(rs.SpawnedAt)
+		} else {
+			dur = time.Since(rs.SpawnedAt)
+		}
 		durStyled := styleDuration(dur, formatRunnerDuration(dur))
 
 		var stateStr string
@@ -544,11 +549,20 @@ func (m Model) renderActiveRunners(w int) string {
 			stateStr = stateRunning.Render("running: " + jobDisplay)
 		case "completing":
 			stateStr = stateCompleting.Render("completing..")
+		case "done":
+			stateStr = stateDone.Render("done")
 		default:
 			stateStr = rs.State
 		}
 
-		detailLine := "   " + durStyled + "  " + stateStr
+		var detailLine string
+		if rs.State == "done" {
+			// Dim the entire detail line for done runners
+			durDimmed := stateDone.Render(formatRunnerDuration(dur))
+			detailLine = "   " + durDimmed + "  " + stateStr
+		} else {
+			detailLine = "   " + durStyled + "  " + stateStr
+		}
 		lines = append(lines, nameLine, detailLine)
 	}
 
@@ -658,6 +672,16 @@ func (m Model) renderHelp(_ int) string {
 }
 
 // ---------- helpers ----------
+
+func (m Model) countActiveRunners(repo string) int {
+	count := 0
+	for _, rs := range m.runners {
+		if rs.Repo == repo && rs.State != "done" {
+			count++
+		}
+	}
+	return count
+}
 
 func (m Model) countActiveJobs(repo string) int {
 	active := make(map[string]bool)
