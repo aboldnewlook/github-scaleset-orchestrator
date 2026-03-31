@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.2](https://github.com/aboldnewlook/github-scaleset-orchestrator/compare/v0.5.1...v0.5.2) (2026-03-31)
+
+
+### Bug Fixes
+
+* pass TLS client options to TUI model for remote connections ([4203529](https://github.com/aboldnewlook/github-scaleset-orchestrator/commit/4203529299725177b41d7390e6c77ab273f45b13))
+
 ## [0.5.1](https://github.com/aboldnewlook/github-scaleset-orchestrator/compare/v0.5.0...v0.5.1) (2026-03-31)
 
 
