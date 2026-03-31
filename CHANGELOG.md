@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1](https://github.com/aboldnewlook/github-scaleset-orchestrator/compare/v0.5.0...v0.5.1) (2026-03-31)
+
+
+### Bug Fixes
+
+* ensure version and build info are included in release image ([d2b6829](https://github.com/aboldnewlook/github-scaleset-orchestrator/commit/d2b6829b02eb9274f9a1bcaa8c40f6032c1fb80c))
+
 ## [0.5.0](https://github.com/aboldnewlook/github-scaleset-orchestrator/compare/v0.4.0...v0.5.0) (2026-03-30)
 
 
