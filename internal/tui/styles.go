@@ -140,4 +140,33 @@ var (
 
 	sparklineLabelStyle = lipgloss.NewStyle().
 				Foreground(colorDim)
+
+	// Search prompt (reuses filter prompt cyan+bold)
+	searchPromptStyle = lipgloss.NewStyle().
+				Foreground(colorCyan).
+				Bold(true)
+
+	// Search match highlight
+	searchMatchStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(colorYellow)
+
+	// Selected event indicator
+	selectedEventStyle = lipgloss.NewStyle().
+				Background(lipgloss.Color("236"))
+
+	// Detail overlay border
+	detailBorder = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(colorCyan).
+			Padding(1, 2)
+
+	// Detail field labels
+	detailLabelStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(colorCyan)
+
+	// Detail field values
+	detailValueStyle = lipgloss.NewStyle().
+				Foreground(colorWhite)
 )

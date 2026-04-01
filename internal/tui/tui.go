@@ -92,6 +92,16 @@ type Model struct {
 	hiddenEventTypes map[event.EventType]bool // true = hidden
 	typeFilterMode   bool                     // true when type-filter overlay is shown
 	typeFilterCursor int                      // cursor position in allEventTypes
+
+	// Search (issue #13)
+	searchMode  bool   // true when '/' search input is active
+	searchQuery string // confirmed search query
+	searchInput string // partial input while typing
+
+	// Event selection and detail (issue #14)
+	selectedEvent     int  // index into visible events (-1 = none selected)
+	expandedEvent     bool // true when detail overlay is shown
+	eventScrollOffset int  // manual scroll position (-1 = auto-scroll to bottom)
 }
 
 // New creates a new TUI model that attaches to a running daemon.
@@ -99,15 +109,17 @@ type Model struct {
 // local Unix socket.
 func New(store *event.FileStore, remoteAddr string, clientOpts ...control.ClientOption) Model {
 	m := Model{
-		store:            store,
-		remoteAddr:       remoteAddr,
-		clientOpts:       clientOpts,
-		events:           make([]event.Event, 0, maxEvents),
-		width:            80,
-		height:           24,
-		startTime:        time.Now(),
-		runners:          make(map[string]*RunnerState),
-		hiddenEventTypes: make(map[event.EventType]bool),
+		store:             store,
+		remoteAddr:        remoteAddr,
+		clientOpts:        clientOpts,
+		events:            make([]event.Event, 0, maxEvents),
+		width:             80,
+		height:            24,
+		startTime:         time.Now(),
+		runners:           make(map[string]*RunnerState),
+		hiddenEventTypes:  make(map[event.EventType]bool),
+		selectedEvent:     -1,
+		eventScrollOffset: -1,
 	}
 
 	// Load events since daemon started (look for most recent daemon.started event)
@@ -174,6 +186,39 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+		// Handle search input mode
+		if m.searchMode {
+			switch msg.String() {
+			case "esc":
+				m.searchMode = false
+				m.searchInput = ""
+			case "enter":
+				m.searchQuery = m.searchInput
+				m.searchMode = false
+				m.searchInput = ""
+				// Jump to first match if there is one
+				if m.searchQuery != "" {
+					visible := m.visibleEvents()
+					for i, e := range visible {
+						if eventMatchesSearch(e, m.searchQuery) {
+							m.selectedEvent = i
+							m.eventScrollOffset = max(i-5, 0)
+							break
+						}
+					}
+				}
+			case "backspace":
+				if len(m.searchInput) > 0 {
+					m.searchInput = m.searchInput[:len(m.searchInput)-1]
+				}
+			default:
+				if len(msg.String()) == 1 {
+					m.searchInput += msg.String()
+				}
+			}
+			return m, nil
+		}
+
 		// Handle repo filter input mode
 		if m.filterMode {
 			switch msg.String() {
@@ -212,7 +257,62 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "t":
 			m.typeFilterMode = !m.typeFilterMode
 			return m, nil
+		case "/":
+			m.searchMode = true
+			m.searchInput = ""
+			return m, nil
+		case "j":
+			visible := m.visibleEvents()
+			if len(visible) > 0 {
+				if m.selectedEvent < 0 {
+					m.selectedEvent = 0
+					m.eventScrollOffset = 0
+				} else if m.selectedEvent < len(visible)-1 {
+					m.selectedEvent++
+				}
+			}
+			return m, nil
+		case "k":
+			if m.selectedEvent > 0 {
+				m.selectedEvent--
+			}
+			return m, nil
+		case "g":
+			visible := m.visibleEvents()
+			if len(visible) > 0 {
+				m.selectedEvent = 0
+				m.eventScrollOffset = 0
+			}
+			return m, nil
+		case "G":
+			m.selectedEvent = -1
+			m.eventScrollOffset = -1
+			return m, nil
+		case "n":
+			m.jumpToNextSearchMatch(1)
+			return m, nil
+		case "N":
+			m.jumpToNextSearchMatch(-1)
+			return m, nil
+		case "enter":
+			if m.selectedEvent >= 0 {
+				m.expandedEvent = !m.expandedEvent
+			}
+			return m, nil
 		case "esc":
+			if m.expandedEvent {
+				m.expandedEvent = false
+				return m, nil
+			}
+			if m.searchQuery != "" {
+				m.searchQuery = ""
+				return m, nil
+			}
+			if m.selectedEvent >= 0 {
+				m.selectedEvent = -1
+				m.eventScrollOffset = -1
+				return m, nil
+			}
 			if m.filterRepo != "" {
 				m.filterRepo = ""
 				return m, nil
@@ -420,7 +520,15 @@ func (m Model) View() string {
 			header, headerSep, content, contentSep, helpBar)
 	}
 
-	return outerBorder.Width(frameW).Render(body)
+	rendered := outerBorder.Width(frameW).Render(body)
+
+	// Overlay the detail view on top if expanded
+	if m.expandedEvent && m.selectedEvent >= 0 {
+		overlay := m.renderDetailOverlay()
+		rendered = m.overlayCenter(rendered, overlay)
+	}
+
+	return rendered
 }
 
 // renderHeader renders the top header bar.
@@ -648,6 +756,9 @@ func (m Model) renderRightPanel(w, h int) string {
 	if m.filterRepo != "" {
 		headerText += " " + filterIndicatorStyle.Render("[repo:"+m.filterRepo+"]")
 	}
+	if m.searchQuery != "" {
+		headerText += " " + filterIndicatorStyle.Render("[search:\""+m.searchQuery+"\"]")
+	}
 	hiddenCount := 0
 	for _, hidden := range m.hiddenEventTypes {
 		if hidden {
@@ -664,33 +775,49 @@ func (m Model) renderRightPanel(w, h int) string {
 		return m.renderTypeFilterOverlay(w, h, header)
 	}
 
-	// If filter input mode is active, show input prompt
+	// Reserve lines for prompts
+	promptLines := 0
 	if m.filterMode {
-		header += "\n " + filterPromptStyle.Render("Filter repo: ") + m.filterInput + filterCursorStyle.Render("_")
+		promptLines++
+	}
+	if m.searchMode {
+		promptLines++
 	}
 
-	maxLines := h - 1
-	if m.filterMode {
-		maxLines--
-	}
+	maxLines := h - 1 - promptLines
 	maxLines = max(maxLines, 1)
 
-	// Collect visible events (applying both filters)
-	var visible []event.Event
-	for _, e := range m.events {
-		if m.filterRepo != "" && !strings.Contains(e.Repo, m.filterRepo) {
-			continue
-		}
-		if m.hiddenEventTypes[e.Type] {
-			continue
-		}
-		visible = append(visible, e)
+	visible := m.visibleEvents()
+
+	// Clamp selectedEvent
+	if m.selectedEvent >= len(visible) {
+		m.selectedEvent = len(visible) - 1
 	}
 
+	// Calculate view window
 	startIdx := 0
-	if len(visible) > maxLines {
-		startIdx = len(visible) - maxLines
+	if m.eventScrollOffset >= 0 && m.selectedEvent >= 0 {
+		// Manual scroll: keep selected event visible
+		startIdx = m.eventScrollOffset
+		if m.selectedEvent < startIdx {
+			startIdx = m.selectedEvent
+		}
+		if m.selectedEvent >= startIdx+maxLines {
+			startIdx = m.selectedEvent - maxLines + 1
+		}
+		startIdx = max(startIdx, 0)
+	} else {
+		// Auto-scroll to bottom
+		if len(visible) > maxLines {
+			startIdx = len(visible) - maxLines
+		}
 	}
+	// Update scroll offset for consistency
+	if m.selectedEvent >= 0 {
+		m.eventScrollOffset = startIdx
+	}
+
+	endIdx := min(startIdx+maxLines, len(visible))
 
 	var lines []string
 	lines = append(lines, header)
@@ -698,9 +825,31 @@ func (m Model) renderRightPanel(w, h int) string {
 	if len(visible) == 0 {
 		lines = append(lines, " "+lipgloss.NewStyle().Foreground(colorDim).Render("(waiting for events...)"))
 	} else {
-		for i := startIdx; i < len(visible); i++ {
-			lines = append(lines, m.renderEventLine(visible[i], w))
+		for i := startIdx; i < endIdx; i++ {
+			line := m.renderEventLine(visible[i], w)
+			isSelected := i == m.selectedEvent
+			isMatch := m.searchQuery != "" && eventMatchesSearch(visible[i], m.searchQuery)
+
+			if isSelected {
+				// Strip ANSI and re-render with selection background
+				line = selectedEventStyle.Width(w).Render(lipgloss.PlaceHorizontal(w, lipgloss.Left, line))
+			}
+			if isMatch && !isSelected {
+				// Add a subtle indicator for search matches
+				line = " " + searchMatchStyle.Render(">") + line[2:]
+			}
+
+			lines = append(lines, line)
 		}
+	}
+
+	// Show filter input prompt
+	if m.filterMode {
+		lines = append(lines, " "+filterPromptStyle.Render("Filter repo: ")+m.filterInput+filterCursorStyle.Render("_"))
+	}
+	// Show search input prompt
+	if m.searchMode {
+		lines = append(lines, " "+searchPromptStyle.Render("/ ")+m.searchInput+filterCursorStyle.Render("_"))
 	}
 
 	content := lipgloss.JoinVertical(lipgloss.Left, lines...)
@@ -769,6 +918,9 @@ func (m Model) renderHelpBar(_ int) string {
 		" " + helpKeyStyle.Render("q") + ": quit  " +
 			helpKeyStyle.Render("f") + ": filter repo  " +
 			helpKeyStyle.Render("t") + ": filter types  " +
+			helpKeyStyle.Render("/") + ": search  " +
+			helpKeyStyle.Render("j/k") + ": select  " +
+			helpKeyStyle.Render("enter") + ": detail  " +
 			helpKeyStyle.Render("?") + ": help")
 }
 
@@ -780,7 +932,12 @@ func (m Model) renderHelp(_ int) string {
 		" " + helpKeyStyle.Render("?") + "       toggle this help panel",
 		" " + helpKeyStyle.Render("f") + "       filter events by repo (type name, tab to cycle, enter to apply)",
 		" " + helpKeyStyle.Render("t") + "       toggle event type visibility (j/k to move, space to toggle)",
-		" " + helpKeyStyle.Render("esc") + "     clear repo filter / close overlay",
+		" " + helpKeyStyle.Render("/") + "       search events (type query, enter to confirm)",
+		" " + helpKeyStyle.Render("j/k") + "     select event down/up",
+		" " + helpKeyStyle.Render("g/G") + "     jump to top/bottom of event list",
+		" " + helpKeyStyle.Render("n/N") + "     jump to next/previous search match",
+		" " + helpKeyStyle.Render("enter") + "   expand selected event detail",
+		" " + helpKeyStyle.Render("esc") + "     close detail / clear search / clear selection / clear filter",
 		" " + helpKeyStyle.Render("ctrl+c") + "  force quit",
 		"",
 	}
@@ -866,6 +1023,188 @@ func (m Model) countCompletedJobs(repo string) int {
 		}
 	}
 	return count
+}
+
+// visibleEvents returns events filtered by repo and type filters.
+func (m Model) visibleEvents() []event.Event {
+	var visible []event.Event
+	for _, e := range m.events {
+		if m.filterRepo != "" && !strings.Contains(e.Repo, m.filterRepo) {
+			continue
+		}
+		if m.hiddenEventTypes[e.Type] {
+			continue
+		}
+		visible = append(visible, e)
+	}
+	return visible
+}
+
+// eventMatchesSearch checks if an event matches the search query (case-insensitive).
+func eventMatchesSearch(e event.Event, query string) bool {
+	if query == "" {
+		return false
+	}
+	q := strings.ToLower(query)
+	if strings.Contains(strings.ToLower(string(e.Type)), q) {
+		return true
+	}
+	if strings.Contains(strings.ToLower(e.Repo), q) {
+		return true
+	}
+	if len(e.Payload) > 0 && strings.Contains(strings.ToLower(string(e.Payload)), q) {
+		return true
+	}
+	return false
+}
+
+// jumpToNextSearchMatch jumps to the next (direction=1) or previous (direction=-1) search match.
+func (m *Model) jumpToNextSearchMatch(direction int) {
+	if m.searchQuery == "" {
+		return
+	}
+	visible := m.visibleEvents()
+	if len(visible) == 0 {
+		return
+	}
+
+	start := m.selectedEvent
+	if start < 0 {
+		if direction > 0 {
+			start = -1
+		} else {
+			start = len(visible)
+		}
+	}
+
+	for i := 1; i <= len(visible); i++ {
+		idx := (start + direction*i) % len(visible)
+		if idx < 0 {
+			idx += len(visible)
+		}
+		if eventMatchesSearch(visible[idx], m.searchQuery) {
+			m.selectedEvent = idx
+			m.eventScrollOffset = max(idx-5, 0)
+			return
+		}
+	}
+}
+
+// renderDetailOverlay renders the event detail modal.
+func (m Model) renderDetailOverlay() string {
+	visible := m.visibleEvents()
+	if m.selectedEvent < 0 || m.selectedEvent >= len(visible) {
+		return ""
+	}
+	e := visible[m.selectedEvent]
+
+	maxW := min(m.width-10, 80)
+	maxW = max(maxW, 30)
+
+	var lines []string
+	lines = append(lines, detailLabelStyle.Render("Time:  ")+detailValueStyle.Render(e.Time.Format("2006-01-02 15:04:05.000")))
+	lines = append(lines, detailLabelStyle.Render("Type:  ")+detailValueStyle.Render(string(e.Type)))
+	if e.Repo != "" {
+		lines = append(lines, detailLabelStyle.Render("Repo:  ")+detailValueStyle.Render(e.Repo))
+	}
+
+	if len(e.Payload) > 0 {
+		lines = append(lines, "")
+		lines = append(lines, detailLabelStyle.Render("Payload:"))
+		var prettyJSON json.RawMessage
+		if err := json.Unmarshal(e.Payload, &prettyJSON); err == nil {
+			formatted, err := json.MarshalIndent(prettyJSON, "", "  ")
+			if err == nil {
+				payloadLines := strings.Split(string(formatted), "\n")
+				maxPayloadLines := min(m.height-12, 20)
+				maxPayloadLines = max(maxPayloadLines, 5)
+				for i, pl := range payloadLines {
+					if i >= maxPayloadLines {
+						lines = append(lines, detailValueStyle.Render("  ..."))
+						break
+					}
+					lines = append(lines, detailValueStyle.Render("  "+pl))
+				}
+			}
+		}
+	}
+
+	lines = append(lines, "")
+	lines = append(lines, helpBarStyle.Render("esc: close  enter: close"))
+
+	content := lipgloss.JoinVertical(lipgloss.Left, lines...)
+	return detailBorder.Width(maxW).Render(content)
+}
+
+// overlayCenter places an overlay string centered on the base string.
+func (m Model) overlayCenter(base, overlay string) string {
+	baseLines := strings.Split(base, "\n")
+	overlayLines := strings.Split(overlay, "\n")
+
+	baseH := len(baseLines)
+	overlayH := len(overlayLines)
+	overlayW := lipgloss.Width(overlay)
+
+	startRow := max((baseH-overlayH)/2, 0)
+	startCol := max((m.width-overlayW)/2, 0)
+
+	for i, oLine := range overlayLines {
+		row := startRow + i
+		if row >= baseH {
+			break
+		}
+		baseLine := baseLines[row]
+		// Pad base line if needed
+		baseRuneWidth := lipgloss.Width(baseLine)
+		if baseRuneWidth < startCol+lipgloss.Width(oLine) {
+			baseLine = baseLine + strings.Repeat(" ", startCol+lipgloss.Width(oLine)-baseRuneWidth)
+		}
+
+		// Simple overlay: replace characters at position
+		// We work with the raw string for simplicity
+		prefix := ""
+		if startCol > 0 && baseRuneWidth >= startCol {
+			prefix = truncateToWidth(baseLine, startCol)
+		} else {
+			prefix = strings.Repeat(" ", startCol)
+		}
+		suffix := ""
+		afterOverlay := startCol + lipgloss.Width(oLine)
+		if afterOverlay < baseRuneWidth {
+			suffix = substringFromWidth(baseLine, afterOverlay)
+		}
+		baseLines[row] = prefix + oLine + suffix
+	}
+
+	return strings.Join(baseLines, "\n")
+}
+
+// truncateToWidth returns the prefix of s that fits in maxWidth visual columns.
+func truncateToWidth(s string, maxWidth int) string {
+	w := 0
+	for i, r := range s {
+		rw := 1
+		_ = r
+		w += rw
+		if w > maxWidth {
+			return s[:i]
+		}
+	}
+	return s
+}
+
+// substringFromWidth returns the suffix of s starting from the given visual column.
+func substringFromWidth(s string, fromWidth int) string {
+	w := 0
+	for i, r := range s {
+		rw := 1
+		_ = r
+		w += rw
+		if w > fromWidth {
+			return s[i:]
+		}
+	}
+	return ""
 }
 
 // ---------- helpers ----------
