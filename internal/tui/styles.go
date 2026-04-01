@@ -120,6 +120,20 @@ var (
 			Bold(true).
 			Foreground(colorYellow)
 
+	// Filter indicator in event header
+	filterIndicatorStyle = lipgloss.NewStyle().
+				Foreground(colorYellow)
+
+	// Filter input prompt
+	filterPromptStyle = lipgloss.NewStyle().
+				Foreground(colorCyan).
+				Bold(true)
+
+	// Filter cursor blink
+	filterCursorStyle = lipgloss.NewStyle().
+				Foreground(colorWhite).
+				Bold(true)
+
 	// Divider line
 	dividerStyle = lipgloss.NewStyle().
 			Foreground(colorBorder)

@@ -47,6 +47,21 @@ type RunnerState struct {
 	State       string    // "starting", "running", "completing", "done"
 }
 
+// allEventTypes lists every event type for the type-filter toggle UI.
+var allEventTypes = []event.EventType{
+	event.EventDaemonStarted,
+	event.EventDaemonStopping,
+	event.EventScaleSetCreated,
+	event.EventScaleSetDeleted,
+	event.EventRunnerSpawned,
+	event.EventRunnerCompleted,
+	event.EventRunnerFailed,
+	event.EventJobStarted,
+	event.EventJobCompleted,
+	event.EventScaleDecision,
+	event.EventError,
+}
+
 // Model is the bubbletea model for the TUI dashboard.
 // It attaches to a running daemon via the control socket and polls
 // the JSONL event store for live updates.
@@ -67,6 +82,16 @@ type Model struct {
 
 	startTime time.Time
 	runners   map[string]*RunnerState
+
+	// Repo filter (issue #11)
+	filterRepo  string // active repo filter; empty = show all
+	filterMode  bool   // true when repo-filter input is active
+	filterInput string // partial input while typing
+
+	// Event type filter (issue #12)
+	hiddenEventTypes map[event.EventType]bool // true = hidden
+	typeFilterMode   bool                     // true when type-filter overlay is shown
+	typeFilterCursor int                      // cursor position in allEventTypes
 }
 
 // New creates a new TUI model that attaches to a running daemon.
@@ -74,14 +99,15 @@ type Model struct {
 // local Unix socket.
 func New(store *event.FileStore, remoteAddr string, clientOpts ...control.ClientOption) Model {
 	m := Model{
-		store:      store,
-		remoteAddr: remoteAddr,
-		clientOpts: clientOpts,
-		events:     make([]event.Event, 0, maxEvents),
-		width:      80,
-		height:     24,
-		startTime:  time.Now(),
-		runners:    make(map[string]*RunnerState),
+		store:            store,
+		remoteAddr:       remoteAddr,
+		clientOpts:       clientOpts,
+		events:           make([]event.Event, 0, maxEvents),
+		width:            80,
+		height:           24,
+		startTime:        time.Now(),
+		runners:          make(map[string]*RunnerState),
+		hiddenEventTypes: make(map[event.EventType]bool),
 	}
 
 	// Load events since daemon started (look for most recent daemon.started event)
@@ -128,12 +154,69 @@ func (m Model) Init() tea.Cmd {
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		// Handle type filter mode input first
+		if m.typeFilterMode {
+			switch msg.String() {
+			case "esc":
+				m.typeFilterMode = false
+			case "up", "k":
+				if m.typeFilterCursor > 0 {
+					m.typeFilterCursor--
+				}
+			case "down", "j":
+				if m.typeFilterCursor < len(allEventTypes)-1 {
+					m.typeFilterCursor++
+				}
+			case " ", "enter":
+				et := allEventTypes[m.typeFilterCursor]
+				m.hiddenEventTypes[et] = !m.hiddenEventTypes[et]
+			}
+			return m, nil
+		}
+
+		// Handle repo filter input mode
+		if m.filterMode {
+			switch msg.String() {
+			case "esc":
+				m.filterMode = false
+				m.filterInput = ""
+			case "enter":
+				m.filterRepo = m.filterInput
+				m.filterMode = false
+				m.filterInput = ""
+			case "backspace":
+				if len(m.filterInput) > 0 {
+					m.filterInput = m.filterInput[:len(m.filterInput)-1]
+				}
+			case "tab":
+				// Cycle through repos from liveStatus
+				m.filterInput = m.cycleRepoFilter(m.filterInput)
+			default:
+				if len(msg.String()) == 1 {
+					m.filterInput += msg.String()
+				}
+			}
+			return m, nil
+		}
+
 		switch msg.String() {
 		case "q", "ctrl+c":
 			return m, tea.Quit
 		case "?":
 			m.showHelp = !m.showHelp
 			return m, nil
+		case "f":
+			m.filterMode = true
+			m.filterInput = m.filterRepo
+			return m, nil
+		case "t":
+			m.typeFilterMode = !m.typeFilterMode
+			return m, nil
+		case "esc":
+			if m.filterRepo != "" {
+				m.filterRepo = ""
+				return m, nil
+			}
 		}
 
 	case tea.WindowSizeMsg:
@@ -468,15 +551,17 @@ func (m Model) renderLeftPanel(w, h int) string {
 func (m Model) renderRepoTable(w int) string {
 	colRunners := 8
 	colJobs := 5
+	colDone := 5
 	colQueued := 2
-	// 3 single-space gaps between 4 columns
-	colRepo := w - colRunners - colJobs - colQueued - 3
+	// 4 single-space gaps between 5 columns
+	colRepo := w - colRunners - colJobs - colDone - colQueued - 4
 	colRepo = max(colRepo, 10)
 
 	header := tableHeaderStyle.Render(
 		padRight("REPO", colRepo) + " " +
 			padLeft("RUNNERS", colRunners) + " " +
 			padLeft("JOBS", colJobs) + " " +
+			padLeft("DONE", colDone) + " " +
 			padLeft("Q", colQueued))
 
 	var rows []string
@@ -490,6 +575,7 @@ func (m Model) renderRepoTable(w int) string {
 		for _, r := range repos {
 			runnerCount := m.countActiveRunners(r.Repo)
 			jobCount := m.countActiveJobs(r.Repo)
+			doneCount := m.countCompletedJobs(r.Repo)
 			queuedCount := m.countQueuedJobs(r.Repo)
 
 			displayName := smartTruncateRepo(r.Repo, colRepo)
@@ -500,6 +586,7 @@ func (m Model) renderRepoTable(w int) string {
 			row := paddedName + " " +
 				padLeft(fmt.Sprintf("%d", runnerCount), colRunners) + " " +
 				padLeft(fmt.Sprintf("%d", jobCount), colJobs) + " " +
+				padLeft(fmt.Sprintf("%d", doneCount), colDone) + " " +
 				padLeft(fmt.Sprintf("%d", queuedCount), colQueued)
 			rows = append(rows, row)
 		}
@@ -571,24 +658,62 @@ func (m Model) renderActiveRunners(w int) string {
 
 // renderRightPanel renders the event log panel.
 func (m Model) renderRightPanel(w, h int) string {
-	header := " " + eventHeaderStyle.Render("Events")
+	headerText := "Events"
+	if m.filterRepo != "" {
+		headerText += " " + filterIndicatorStyle.Render("[repo:"+m.filterRepo+"]")
+	}
+	hiddenCount := 0
+	for _, hidden := range m.hiddenEventTypes {
+		if hidden {
+			hiddenCount++
+		}
+	}
+	if hiddenCount > 0 {
+		headerText += " " + filterIndicatorStyle.Render(fmt.Sprintf("[%d type(s) hidden]", hiddenCount))
+	}
+	header := " " + eventHeaderStyle.Render(headerText)
+
+	// If type filter overlay is active, render it instead of events
+	if m.typeFilterMode {
+		return m.renderTypeFilterOverlay(w, h, header)
+	}
+
+	// If filter input mode is active, show input prompt
+	if m.filterMode {
+		header += "\n " + filterPromptStyle.Render("Filter repo: ") + m.filterInput + filterCursorStyle.Render("_")
+	}
 
 	maxLines := h - 1
+	if m.filterMode {
+		maxLines--
+	}
 	maxLines = max(maxLines, 1)
 
+	// Collect visible events (applying both filters)
+	var visible []event.Event
+	for _, e := range m.events {
+		if m.filterRepo != "" && !strings.Contains(e.Repo, m.filterRepo) {
+			continue
+		}
+		if m.hiddenEventTypes[e.Type] {
+			continue
+		}
+		visible = append(visible, e)
+	}
+
 	startIdx := 0
-	if len(m.events) > maxLines {
-		startIdx = len(m.events) - maxLines
+	if len(visible) > maxLines {
+		startIdx = len(visible) - maxLines
 	}
 
 	var lines []string
 	lines = append(lines, header)
 
-	if len(m.events) == 0 {
+	if len(visible) == 0 {
 		lines = append(lines, " "+lipgloss.NewStyle().Foreground(colorDim).Render("(waiting for events...)"))
 	} else {
-		for i := startIdx; i < len(m.events); i++ {
-			lines = append(lines, m.renderEventLine(m.events[i], w))
+		for i := startIdx; i < len(visible); i++ {
+			lines = append(lines, m.renderEventLine(visible[i], w))
 		}
 	}
 
@@ -656,6 +781,8 @@ func isSucceeded(e event.Event) bool {
 func (m Model) renderHelpBar(_ int) string {
 	return helpBarStyle.Render(
 		" " + helpKeyStyle.Render("q") + ": quit  " +
+			helpKeyStyle.Render("f") + ": filter repo  " +
+			helpKeyStyle.Render("t") + ": filter types  " +
 			helpKeyStyle.Render("?") + ": help")
 }
 
@@ -665,10 +792,94 @@ func (m Model) renderHelp(_ int) string {
 		"",
 		" " + helpKeyStyle.Render("q") + "       quit the TUI (daemon keeps running)",
 		" " + helpKeyStyle.Render("?") + "       toggle this help panel",
+		" " + helpKeyStyle.Render("f") + "       filter events by repo (type name, tab to cycle, enter to apply)",
+		" " + helpKeyStyle.Render("t") + "       toggle event type visibility (j/k to move, space to toggle)",
+		" " + helpKeyStyle.Render("esc") + "     clear repo filter / close overlay",
 		" " + helpKeyStyle.Render("ctrl+c") + "  force quit",
 		"",
 	}
 	return lipgloss.JoinVertical(lipgloss.Left, lines...)
+}
+
+// renderTypeFilterOverlay renders the event type toggle overlay.
+func (m Model) renderTypeFilterOverlay(w, h int, header string) string {
+	var lines []string
+	lines = append(lines, header)
+	lines = append(lines, " "+filterPromptStyle.Render("Toggle event types (space=toggle, esc=close):"))
+	lines = append(lines, "")
+
+	for i, et := range allEventTypes {
+		check := "  [x] "
+		if m.hiddenEventTypes[et] {
+			check = "  [ ] "
+		}
+		cursor := "  "
+		if i == m.typeFilterCursor {
+			cursor = "> "
+		}
+		style := eventTypeDefault
+		if i == m.typeFilterCursor {
+			style = lipgloss.NewStyle().Foreground(colorWhite).Bold(true)
+		}
+		lines = append(lines, cursor+check+style.Render(string(et)))
+	}
+
+	content := lipgloss.JoinVertical(lipgloss.Left, lines...)
+	contentH := lipgloss.Height(content)
+	if contentH < h {
+		content = content + strings.Repeat("\n", h-contentH)
+	} else if contentH > h {
+		ls := strings.Split(content, "\n")
+		if len(ls) > h {
+			ls = ls[:h]
+		}
+		content = strings.Join(ls, "\n")
+	}
+
+	return lipgloss.NewStyle().Width(w).Render(content)
+}
+
+// cycleRepoFilter cycles through available repos matching the current input.
+func (m Model) cycleRepoFilter(current string) string {
+	if m.liveStatus == nil || len(m.liveStatus.Repos) == 0 {
+		return current
+	}
+
+	var repos []string
+	for _, r := range m.liveStatus.Repos {
+		repos = append(repos, r.Repo)
+	}
+	sort.Strings(repos)
+
+	// Filter to repos matching current prefix
+	var matching []string
+	for _, r := range repos {
+		if current == "" || strings.Contains(r, current) {
+			matching = append(matching, r)
+		}
+	}
+	if len(matching) == 0 {
+		return current
+	}
+
+	// Find current in matching and advance
+	for i, r := range matching {
+		if r == current {
+			return matching[(i+1)%len(matching)]
+		}
+	}
+	return matching[0]
+}
+
+// countCompletedJobs counts job.completed events for a given repo.
+func (m Model) countCompletedJobs(repo string) int {
+	count := 0
+	for _, e := range m.events {
+		if e.Type == event.EventJobCompleted && e.Repo == repo {
+			count++
+		}
+	}
+	return count
 }
 
 // ---------- helpers ----------
