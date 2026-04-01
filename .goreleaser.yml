@@ -1,0 +1,38 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+version: 2
+
+builds:
+  - binary: gso
+    main: .
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X github.com/aboldnewlook/github-scaleset-orchestrator/internal/buildinfo.Version={{.Version}}
+      - -X github.com/aboldnewlook/github-scaleset-orchestrator/internal/buildinfo.Commit={{.Commit}}
+      - -X github.com/aboldnewlook/github-scaleset-orchestrator/internal/buildinfo.Date={{.Date}}
+
+archives:
+  - formats:
+      - tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - README.md
+      - LICENSE
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+changelog:
+  disable: true
+
+release:
+  draft: false
+  make_latest: true
