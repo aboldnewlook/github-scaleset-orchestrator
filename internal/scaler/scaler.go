@@ -177,9 +177,10 @@ func (s *Scaler) HandleJobCompleted(ctx context.Context, jobInfo *scaleset.JobCo
 		Type: event.EventJobCompleted,
 		Repo: s.repo,
 		Payload: mustMarshal(map[string]any{
-			"job":    jobInfo.JobDisplayName,
-			"runner": jobInfo.RunnerName,
-			"result": jobInfo.Result,
+			"job":      jobInfo.JobDisplayName,
+			"runner":   jobInfo.RunnerName,
+			"result":   jobInfo.Result,
+			"workflow": jobInfo.WorkflowRunID,
 		}),
 	})
 

@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os/exec"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -295,8 +297,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.jumpToNextSearchMatch(-1)
 			return m, nil
 		case "enter":
-			if m.selectedEvent >= 0 {
-				m.expandedEvent = !m.expandedEvent
+			if m.selectedEvent >= 0 && !m.expandedEvent {
+				m.expandedEvent = true
+			}
+			return m, nil
+		case "o":
+			if m.expandedEvent && m.selectedEvent >= 0 {
+				visible := m.visibleEvents()
+				if m.selectedEvent < len(visible) {
+					if u := eventWorkflowURL(visible[m.selectedEvent]); u != "" {
+						return m, openURLCmd(u)
+					}
+				}
 			}
 			return m, nil
 		case "esc":
@@ -909,11 +921,17 @@ func (m Model) renderEventLine(e event.Event, w int) string {
 	payloadMax = max(payloadMax, 0)
 	payload = truncate(payload, payloadMax)
 
+	// Wrap payload in OSC 8 hyperlink for events with workflow URLs
+	styledPayload := eventPayloadStyle.Render(payload)
+	if u := eventWorkflowURL(e); u != "" {
+		styledPayload = osc8Link(u, styledPayload)
+	}
+
 	return fmt.Sprintf(" %s  %-16s  %-12s  %s",
 		eventTimeStyle.Render(ts),
 		styleEventType(e),
 		eventRepoStyle.Render(repo),
-		eventPayloadStyle.Render(payload))
+		styledPayload)
 }
 
 // styleEventType returns the styled event type string.
@@ -962,6 +980,7 @@ func (m Model) renderHelp(_ int) string {
 		" " + helpKeyStyle.Render("g/G") + "     jump to top/bottom of event list",
 		" " + helpKeyStyle.Render("n/N") + "     jump to next/previous search match",
 		" " + helpKeyStyle.Render("enter") + "   expand selected event detail",
+		" " + helpKeyStyle.Render("o") + "       open workflow run in browser (in detail view)",
 		" " + helpKeyStyle.Render("esc") + "     close detail / clear search / clear selection / clear filter",
 		" " + helpKeyStyle.Render("ctrl+c") + "  force quit",
 		"",
@@ -1155,7 +1174,11 @@ func (m Model) renderDetailOverlay() string {
 	}
 
 	lines = append(lines, "")
-	lines = append(lines, helpBarStyle.Render("esc: close  enter: close"))
+	helpText := "esc: close"
+	if eventWorkflowURL(e) != "" {
+		helpText += "  o: open in browser"
+	}
+	lines = append(lines, helpBarStyle.Render(helpText))
 
 	content := lipgloss.JoinVertical(lipgloss.Left, lines...)
 	return detailBorder.Width(maxW).Render(content)
@@ -1398,5 +1421,46 @@ func styleDuration(d time.Duration, s string) string {
 		return durationYellow.Render(s)
 	default:
 		return durationRed.Render(s)
+	}
+}
+
+// eventWorkflowURL constructs a GitHub Actions URL from an event's payload.
+// Returns empty string if the event doesn't have a workflow run ID.
+func eventWorkflowURL(e event.Event) string {
+	if e.Type != event.EventJobStarted && e.Type != event.EventJobCompleted {
+		return ""
+	}
+	if e.Repo == "" {
+		return ""
+	}
+	wf := payloadField(e.Payload, "workflow")
+	if wf == "" || wf == "0" {
+		return ""
+	}
+	return fmt.Sprintf("https://github.com/%s/actions/runs/%s", e.Repo, wf)
+}
+
+// osc8Link wraps text in an OSC 8 hyperlink escape sequence.
+// Terminals that support OSC 8 (iTerm2, kitty, WezTerm) render clickable links;
+// others display the text unchanged.
+func osc8Link(url, text string) string {
+	return fmt.Sprintf("\033]8;;%s\033\\%s\033]8;;\033\\", url, text)
+}
+
+// urlOpenMsg is returned by openURLCmd (fire and forget).
+type urlOpenMsg struct{}
+
+// openURLCmd returns a tea.Cmd that opens a URL in the default browser.
+func openURLCmd(url string) tea.Cmd {
+	return func() tea.Msg {
+		var cmd *exec.Cmd
+		switch runtime.GOOS {
+		case "darwin":
+			cmd = exec.Command("open", url)
+		default:
+			cmd = exec.Command("xdg-open", url)
+		}
+		_ = cmd.Start()
+		return urlOpenMsg{}
 	}
 }
