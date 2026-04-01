@@ -3,7 +3,6 @@ package control_test
 import (
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
 	"net"
 	"os"
@@ -138,7 +137,7 @@ func startTLSEchoServer(t *testing.T) (addr string, serverTLSCfg *tls.Config, fi
 				return
 			}
 			go func(c net.Conn) {
-				defer c.Close()
+				defer func() { _ = c.Close() }()
 				dec := json.NewDecoder(c)
 				enc := json.NewEncoder(c)
 				var req control.Request
@@ -456,17 +455,4 @@ func TestTOFUSecondConnectSameFingerprint(t *testing.T) {
 	if parsed["method"] != control.MethodLiveStatus {
 		t.Fatalf("expected method %q, got %q", control.MethodLiveStatus, parsed["method"])
 	}
-}
-
-// parseTLSFingerprint extracts the fingerprint from the server's TLS config for assertions.
-func parseTLSFingerprint(t *testing.T, serverCfg *tls.Config) string {
-	t.Helper()
-	if len(serverCfg.Certificates) == 0 {
-		t.Fatal("server TLS config has no certificates")
-	}
-	cert, err := x509.ParseCertificate(serverCfg.Certificates[0].Certificate[0])
-	if err != nil {
-		t.Fatalf("parsing server certificate: %v", err)
-	}
-	return control.CertFingerprint(cert)
 }
