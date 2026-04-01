@@ -346,7 +346,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		for _, e := range msg.events {
-			if !e.Time.After(m.lastTime) {
+			if e.Time.Before(m.lastTime) {
+				continue
+			}
+			// Dedup events with the same timestamp that we already ingested
+			isDup := false
+			for i := len(m.events) - 1; i >= 0 && m.events[i].Time.Equal(e.Time); i-- {
+				if m.events[i].Type == e.Type && m.events[i].Repo == e.Repo {
+					isDup = true
+					break
+				}
+			}
+			if isDup {
 				continue
 			}
 			if len(m.events) >= maxEvents {
