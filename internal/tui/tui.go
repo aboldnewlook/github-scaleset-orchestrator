@@ -1346,6 +1346,14 @@ func payloadField(payload json.RawMessage, key string) string {
 	if !ok {
 		return ""
 	}
+	// JSON numbers unmarshal as float64; format large integers without
+	// scientific notation (e.g., workflow run IDs).
+	if f, ok := v.(float64); ok {
+		if f == float64(int64(f)) {
+			return fmt.Sprintf("%d", int64(f))
+		}
+		return fmt.Sprintf("%g", f)
+	}
 	return fmt.Sprintf("%v", v)
 }
 
