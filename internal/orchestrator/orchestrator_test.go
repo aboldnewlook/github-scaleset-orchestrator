@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"reflect"
 	"runtime"
 	"testing"
 
@@ -103,6 +104,53 @@ func TestSetMaxRunners(t *testing.T) {
 	// Verify the semaphore was actually resized.
 	if o.sem.Available() != 8 {
 		t.Fatalf("sem.Available() = %d after SetMaxRunners(8), want 8", o.sem.Available())
+	}
+}
+
+type recordingCapacitySetter struct {
+	counts []int
+}
+
+func (r *recordingCapacitySetter) SetMaxRunners(count int) {
+	r.counts = append(r.counts, count)
+}
+
+func TestSetMaxRunnersUpdatesActiveAndLateListeners(t *testing.T) {
+	o := New(&config.Config{MaxRunners: 4}, testLogger(), nil)
+	o.sem = scaler.NewSemaphore(4)
+	first := &recordingCapacitySetter{}
+	o.registerListener("org/first", nil, first)
+
+	if err := o.SetMaxRunners(8); err != nil {
+		t.Fatal(err)
+	}
+	second := &recordingCapacitySetter{}
+	o.registerListener("org/second", nil, second)
+	if err := o.SetMaxRunners(2); err != nil {
+		t.Fatal(err)
+	}
+	if got := o.sem.Max(); got != 2 {
+		t.Fatalf("semaphore max = %d, want 2", got)
+	}
+	if !reflect.DeepEqual(first.counts, []int{4, 8, 2}) {
+		t.Fatalf("first listener capacities = %v, want [4 8 2]", first.counts)
+	}
+	if !reflect.DeepEqual(second.counts, []int{8, 2}) {
+		t.Fatalf("late listener capacities = %v, want [8 2]", second.counts)
+	}
+
+	o.unregisterListener("org/first")
+	if err := o.SetMaxRunners(3); err != nil {
+		t.Fatal(err)
+	}
+	if len(first.counts) != 3 || second.counts[len(second.counts)-1] != 3 {
+		t.Fatalf("unregistered listener changed or active listener missed update: first=%v second=%v", first.counts, second.counts)
+	}
+	if err := o.SetMaxRunners(0); err == nil {
+		t.Fatal("expected invalid capacity to be rejected")
+	}
+	if got := o.MaxRunners(); got != 3 {
+		t.Fatalf("capacity changed after invalid update: got %d, want 3", got)
 	}
 }
 
