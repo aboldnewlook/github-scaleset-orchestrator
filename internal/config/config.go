@@ -3,7 +3,9 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 
@@ -20,8 +22,9 @@ type TokenSource struct {
 }
 
 type Repo struct {
-	Name  string      `yaml:"name"            mapstructure:"name"  json:"name"`
-	Token TokenSource `yaml:"token,omitempty" mapstructure:"token" json:"token"`
+	Name        string      `yaml:"name"            mapstructure:"name"  json:"name"`
+	Token       TokenSource `yaml:"token,omitempty" mapstructure:"token" json:"token"`
+	RunnerCache string      `yaml:"runner_cache,omitempty" mapstructure:"runner_cache" json:"runner_cache,omitempty"`
 }
 
 // ControlConfig defines settings for the remote TCP control server.
@@ -32,12 +35,27 @@ type ControlConfig struct {
 	AllowCIDRs []string `yaml:"allow_cidrs" mapstructure:"allow_cidrs"`
 }
 
+// RunnerConfig selects how ephemeral jobs execute. Docker jobs run in sibling
+// containers and do not inherit the manager's environment or mounts.
+type RunnerConfig struct {
+	Executor   string  `yaml:"executor"  mapstructure:"executor"`
+	Image      string  `yaml:"image"     mapstructure:"image"`
+	MemoryMB   int64   `yaml:"memory_mb" mapstructure:"memory_mb"`
+	CPUs       float64 `yaml:"cpus"      mapstructure:"cpus"`
+	Cache      string  `yaml:"cache"     mapstructure:"cache"`
+	CacheRoot  string  `yaml:"cache_root" mapstructure:"cache_root"`
+	InstanceID string  `yaml:"instance_id" mapstructure:"instance_id"`
+	CacheUID   int     `yaml:"cache_uid" mapstructure:"cache_uid"`
+	CacheGID   int     `yaml:"cache_gid" mapstructure:"cache_gid"`
+}
+
 type Config struct {
 	Auth       TokenSource   `yaml:"auth"        mapstructure:"auth"`
 	MaxRunners int           `yaml:"max_runners" mapstructure:"max_runners"`
 	Labels     []string      `yaml:"labels"      mapstructure:"labels"`
 	Repos      []Repo        `yaml:"repos"       mapstructure:"repos"`
 	Control    ControlConfig `yaml:"control"     mapstructure:"control"`
+	Runner     RunnerConfig  `yaml:"runner"      mapstructure:"runner"`
 }
 
 // Load reads configuration from the given file path, overlaid with environment
@@ -49,6 +67,10 @@ func Load(path string) (*Config, error) {
 	// Defaults
 	v.SetDefault("max_runners", runtime.NumCPU())
 	v.SetDefault("labels", []string{"self-hosted"})
+	v.SetDefault("runner.executor", "subprocess")
+	v.SetDefault("runner.cache", "none")
+	v.SetDefault("runner.cache_uid", 1001)
+	v.SetDefault("runner.cache_gid", 1001)
 
 	// Config file
 	v.SetConfigType("yaml")
@@ -78,6 +100,15 @@ func Load(path string) (*Config, error) {
 	_ = v.BindEnv("control.listen", "GSO_CONTROL_LISTEN")
 	_ = v.BindEnv("control.tls_cert", "GSO_CONTROL_TLS_CERT")
 	_ = v.BindEnv("control.tls_key", "GSO_CONTROL_TLS_KEY")
+	_ = v.BindEnv("runner.executor", "GSO_RUNNER_EXECUTOR")
+	_ = v.BindEnv("runner.image", "GSO_RUNNER_IMAGE")
+	_ = v.BindEnv("runner.memory_mb", "GSO_RUNNER_MEMORY_MB")
+	_ = v.BindEnv("runner.cpus", "GSO_RUNNER_CPUS")
+	_ = v.BindEnv("runner.cache", "GSO_RUNNER_CACHE")
+	_ = v.BindEnv("runner.cache_root", "GSO_RUNNER_CACHE_ROOT")
+	_ = v.BindEnv("runner.instance_id", "GSO_RUNNER_INSTANCE_ID")
+	_ = v.BindEnv("runner.cache_uid", "GSO_RUNNER_CACHE_UID")
+	_ = v.BindEnv("runner.cache_gid", "GSO_RUNNER_CACHE_GID")
 
 	// Parse GSO_REPOS before Viper unmarshal -- Viper can't map an env
 	// string into a slice-of-structs, so we handle it ourselves.
@@ -157,12 +188,39 @@ func (c *Config) validate() error {
 	if c.MaxRunners < 1 {
 		return fmt.Errorf("max_runners must be at least 1")
 	}
+	if c.Runner.Executor != "subprocess" && c.Runner.Executor != "docker" {
+		return fmt.Errorf("runner.executor must be subprocess or docker")
+	}
+	if c.Runner.Executor == "docker" && strings.TrimSpace(c.Runner.Image) == "" {
+		return fmt.Errorf("runner.image is required for docker executor")
+	}
+	if c.Runner.Executor == "docker" && strings.TrimSpace(c.Runner.InstanceID) == "" {
+		return fmt.Errorf("runner.instance_id is required for docker executor")
+	}
+	if c.Runner.MemoryMB < 0 || c.Runner.CPUs < 0 {
+		return fmt.Errorf("runner resource limits cannot be negative")
+	}
+	if c.Runner.MemoryMB > math.MaxInt64/(1024*1024) || math.IsNaN(c.Runner.CPUs) || math.IsInf(c.Runner.CPUs, 0) || c.Runner.CPUs > float64(math.MaxInt64)/1e9 {
+		return fmt.Errorf("runner resource limits are too large")
+	}
+	if c.Runner.Cache != "none" && c.Runner.Cache != "repo" {
+		return fmt.Errorf("runner.cache must be none or repo")
+	}
+	if c.Runner.CacheRoot != "" && !filepath.IsAbs(c.Runner.CacheRoot) {
+		return fmt.Errorf("runner.cache_root must be an absolute path")
+	}
+	if c.Runner.CacheUID < 0 || c.Runner.CacheGID < 0 {
+		return fmt.Errorf("runner cache UID and GID cannot be negative")
+	}
 
 	// Validate that at least global auth or every repo has a token source
 	globalHasSource := c.Auth.hasSource()
 	for _, repo := range c.Repos {
 		if repo.Name == "" {
 			return fmt.Errorf("repo name is required")
+		}
+		if repo.RunnerCache != "" && repo.RunnerCache != "none" && repo.RunnerCache != "repo" {
+			return fmt.Errorf("repo %s runner_cache must be none or repo", repo.Name)
 		}
 		if !globalHasSource && !repo.Token.hasSource() {
 			return fmt.Errorf("repo %s has no token source and no global auth configured", repo.Name)

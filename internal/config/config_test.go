@@ -594,3 +594,53 @@ func searchStr(s, sub string) bool {
 	}
 	return false
 }
+
+func TestDockerRunnerConfigFromEnvironment(t *testing.T) {
+	t.Setenv("GSO_AUTH_ENV", "GITHUB_TOKEN")
+	t.Setenv("GSO_REPOS", `[{"name":"owner/trusted","runner_cache":"repo"},{"name":"owner/untrusted","runner_cache":"none"}]`)
+	t.Setenv("GSO_RUNNER_EXECUTOR", "docker")
+	t.Setenv("GSO_RUNNER_IMAGE", "example/job@sha256:abc")
+	t.Setenv("GSO_RUNNER_INSTANCE_ID", "unraid-main-gso")
+	t.Setenv("GSO_RUNNER_MEMORY_MB", "3072")
+	t.Setenv("GSO_RUNNER_CPUS", "1.5")
+	t.Setenv("GSO_RUNNER_CACHE", "none")
+	t.Setenv("GSO_RUNNER_CACHE_ROOT", "/mnt/cache/gso-job-cache")
+	t.Setenv("GSO_RUNNER_CACHE_UID", "2000")
+	t.Setenv("GSO_RUNNER_CACHE_GID", "2001")
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Runner.Executor != "docker" || cfg.Runner.Image != "example/job@sha256:abc" || cfg.Runner.InstanceID != "unraid-main-gso" || cfg.Runner.MemoryMB != 3072 || cfg.Runner.CPUs != 1.5 || cfg.Runner.CacheRoot != "/mnt/cache/gso-job-cache" || cfg.Runner.CacheUID != 2000 || cfg.Runner.CacheGID != 2001 {
+		t.Fatalf("Docker runner config = %+v", cfg.Runner)
+	}
+	if cfg.Repos[0].RunnerCache != "repo" || cfg.Repos[1].RunnerCache != "none" {
+		t.Fatalf("repo cache policies = %+v", cfg.Repos)
+	}
+}
+
+func TestInvalidDockerRunnerConfig(t *testing.T) {
+	base := Config{Auth: TokenSource{Env: "GITHUB_TOKEN"}, MaxRunners: 1, Repos: []Repo{{Name: "owner/repo"}}}
+	cases := []struct {
+		name      string
+		runner    RunnerConfig
+		repoCache string
+	}{
+		{"missing image", RunnerConfig{Executor: "docker", Cache: "none"}, ""},
+		{"bad executor", RunnerConfig{Executor: "podman", Cache: "none"}, ""},
+		{"bad cache", RunnerConfig{Executor: "subprocess", Cache: "shared"}, ""},
+		{"relative cache root", RunnerConfig{Executor: "docker", Image: "job", InstanceID: "instance", Cache: "none", CacheRoot: "relative/path"}, ""},
+		{"bad repo policy", RunnerConfig{Executor: "docker", Image: "job", InstanceID: "instance", Cache: "none"}, "all"},
+		{"negative cache UID", RunnerConfig{Executor: "docker", Image: "job", InstanceID: "instance", Cache: "none", CacheUID: -1}, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := base
+			cfg.Runner = tc.runner
+			cfg.Repos = []Repo{{Name: "owner/repo", RunnerCache: tc.repoCache}}
+			if err := cfg.validate(); err == nil {
+				t.Fatal("expected validation error")
+			}
+		})
+	}
+}

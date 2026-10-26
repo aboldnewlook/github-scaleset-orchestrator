@@ -85,6 +85,19 @@ auth:
 
 max_runners: 4
 
+# Optional: run each job in a sibling Docker container.
+# Subprocess remains the default for existing installations.
+# runner:
+#   executor: docker
+#   image: ghcr.io/aboldnewlook/github-scaleset-orchestrator:0.6.0
+#   instance_id: my-unique-manager
+#   memory_mb: 3072
+#   cpus: 1.5
+#   cache: none
+#   cache_root: /mnt/cache/gso-job-cache
+#   cache_uid: 1001
+#   cache_gid: 1001
+
 labels:
   - self-hosted
 
@@ -141,6 +154,7 @@ labels:
 repos:
   - name: owner/repo-a
     # Uses global auth
+    # runner_cache: repo  # trusted jobs only; shares a persistent cache within this repo
 
   - name: owner/repo-b
     # Per-repo token override (same resolution options as global auth)
@@ -191,17 +205,17 @@ There is no way to scope a PAT to just "manage runners" at the repo level.
 
 3. **OS keychain storage.** Tokens stored in the keychain are encrypted at rest and protected by your OS login credentials. Prefer `keychain` over `env` or `file`.
 
-4. **Runner process isolation.** The runner subprocess never sees your PAT. It receives only a JIT config (a short-lived, single-use credential). Your PAT is used only by the orchestrator to call the Scale Set API.
+4. **Docker job isolation.** With `runner.executor: docker`, each job runs in a sibling container that receives a single-use JIT config. It does not receive the manager PAT, config, cache, or Docker socket. The default subprocess executor filters sensitive environment variables, but jobs share the manager's user and filesystem; use Docker mode for untrusted workflows.
 
-5. **Ephemeral runners.** Each runner gets a fresh temp directory, runs one job, and is deleted. No persistent state accumulates.
+5. **Ephemeral runners.** Each runner handles one job. Docker job containers and their temporary workspaces are removed afterward. An optional per-repo tool cache persists by design; subprocess jobs can write outside their temporary workspace.
 
-### Recommendation: Use a Free GitHub Organization
+### Organization Runner Alternative
 
-If you can, create a free GitHub org and move (or fork) your repos there. Org-level runner management requires only `organization_self_hosted_runners:write`, which is a much narrower permission. It cannot delete repos or change visibility.
+GitHub organization runners can use the narrower `organization_self_hosted_runners:write` permission. GSO currently creates repository scale sets and requires repo `administration:write`; it does not manage organization runner scale sets. Moving to an organization runner setup would require a different controller or future GSO support.
 
 ### Runner GITHUB_TOKEN
 
-The runner subprocess gets its own `GITHUB_TOKEN` per job, automatically issued by GitHub Actions. Your PAT is never exposed to workflow code.
+Each job gets its own `GITHUB_TOKEN`, automatically issued by GitHub Actions. In Docker mode, the manager PAT is outside the job container.
 
 ## Commands
 
@@ -253,6 +267,18 @@ volumes:
   runner-cache:
 ```
 
+### Docker job executor
+
+Set `GSO_RUNNER_EXECUTOR=docker`, `GSO_RUNNER_IMAGE` to an image containing `/usr/local/bin/gso-job` and `/opt/gso-runner`, and `GSO_RUNNER_INSTANCE_ID` to a unique stable value. The stock gso image includes both. Mount `/var/run/docker.sock` **only into the manager**, and give its process permission to use the socket. The Docker socket gives the manager host-level control; keep its token and socket inaccessible to job containers. Pin the job image to a tested tag or digest.
+
+The manager creates one sibling container per JIT runner. Jobs inherit only the image environment plus their JIT config, run as the image's non-root `runner` user, have all Linux capabilities dropped, and receive no manager volumes or host paths. Optional `GSO_RUNNER_MEMORY_MB` and `GSO_RUNNER_CPUS` set per-job limits. Set `max_runners` based on total host memory; for a 14.6 GiB host, start with two jobs at 3 to 4 GiB each.
+
+`GSO_RUNNER_CACHE=none` is the default. To share Go and npm download/build caches within a trusted repository, set `runner_cache: repo` on that repo (including in `GSO_REPOS` JSON). Each repo has a separate hashed cache mounted at `/cache`; `GOCACHE`, `GOMODCACHE`, and `NPM_CONFIG_CACHE` point there. Jobs can change shared cache contents, so keep `runner_cache: none` for untrusted PR workflows. Named Docker volumes are used by default. Set `GSO_RUNNER_CACHE_ROOT` to an absolute SSD host path, mounted into the manager at the same path, to keep caches out of Docker's data-root; the manager creates hashed per-repo directories there.
+
+The stock job image runs as UID/GID `1001:1001`. For a custom image with another numeric user, set `GSO_RUNNER_CACHE_UID` and `GSO_RUNNER_CACHE_GID` so a root manager can give new host cache directories to that user. A non-root manager needs write access to the configured cache root and should run under a UID that can write the created subdirectories.
+
+At startup, the manager force-removes leftover containers labeled with its `instance_id`. Use a distinct ID for every concurrently running manager. Cancellation force-removes the container. Container logs are replayed after the job exits; live log streaming is not implemented yet.
+
 ### Unraid + Portainer
 
 See [docs/unraid-portainer.md](docs/unraid-portainer.md) for a complete deployment guide using Portainer stacks.
@@ -272,10 +298,10 @@ When a job is queued:
 1. The `Scaler` for that repo is called with the desired runner count
 2. It checks the shared semaphore for available capacity
 3. For each runner to create, it calls `GenerateJitRunnerConfig` to get a single-use credential
-4. A `Worker` goroutine copies the cached runner binary to a fresh temp directory
-5. The runner subprocess starts with the JIT config passed via environment variable
+4. A worker creates a temporary subprocess workspace or a sibling Docker container
+5. The runner starts with the JIT config passed via environment variable
 6. The runner registers with GitHub, picks up exactly one job, executes it, and exits
-7. The temp directory is cleaned up and the semaphore slot is released
+7. The temporary workspace or container is removed and the semaphore slot is released
 
 ### Stale Session Recovery
 

@@ -52,15 +52,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root runner user
-RUN useradd -m -s /bin/bash -d /home/runner runner
+RUN groupadd -g 1001 runner && useradd -u 1001 -g runner -m -s /bin/bash -d /home/runner runner
 
 # Set up directories
 RUN mkdir -p /etc/gso \
     && mkdir -p /opt/gso/cache \
+    && mkdir -p /cache \
     && mkdir -p /home/runner/.cache \
     && mkdir -p /home/runner/.config/gso/tls \
     && chown -R runner:runner /home/runner \
     && chown -R runner:runner /opt/gso \
+    && chown -R runner:runner /cache \
     && chown -R runner:runner /etc/gso
 
 # Copy the Go binary from builder
@@ -70,6 +72,11 @@ COPY --from=builder /out/gso /usr/local/bin/gso
 # os.UserCacheDir() on Linux returns $XDG_CACHE_HOME or $HOME/.cache
 # We set XDG_CACHE_HOME so the manager finds the pre-baked runner
 COPY --from=runner-dl --chown=runner:runner /opt/runner-cache/gso /home/runner/.cache/gso
+
+# Docker executor jobs use this immutable image copy; the manager's mutable
+# runner cache is never mounted into a job container.
+COPY --from=runner-dl --chown=runner:runner /opt/runner-cache/gso /opt/gso-runner
+COPY --chmod=755 docker/gso-job /usr/local/bin/gso-job
 
 # Set XDG_CACHE_HOME so os.UserCacheDir() resolves to /home/runner/.cache
 ENV XDG_CACHE_HOME=/home/runner/.cache

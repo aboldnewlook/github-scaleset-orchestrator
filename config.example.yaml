@@ -10,6 +10,20 @@ auth:
 # Maximum concurrent runner processes (default: number of CPUs)
 max_runners: 4
 
+# Optional isolation for each ephemeral job. The default is subprocess mode.
+# Docker mode requires the manager to have Docker socket access. The job image
+# must include /usr/local/bin/gso-job and /opt/gso-runner (the stock image does).
+# runner:
+#   executor: docker
+#   image: ghcr.io/aboldnewlook/github-scaleset-orchestrator:0.6.0
+#   instance_id: unraid-main-gso  # unique, stable ID for crash cleanup
+#   memory_mb: 3072
+#   cpus: 1.5
+#   cache: none                # none (default) or repo
+#   cache_root: /mnt/cache/gso-job-cache  # optional SSD host path, same path in manager
+#   cache_uid: 1001           # job image runner UID for host cache ownership
+#   cache_gid: 1001           # job image runner GID for host cache ownership
+
 # Labels applied to all runners (in addition to auto-detected OS/arch)
 labels:
   - self-hosted
@@ -17,6 +31,7 @@ labels:
 # Repositories to watch for jobs
 repos:
   - name: owner/repo-a
+    # runner_cache: repo  # trusted repos only; persistent cache can be modified by jobs
 
   - name: owner/repo-b
     # Per-repo token override (same resolution options)

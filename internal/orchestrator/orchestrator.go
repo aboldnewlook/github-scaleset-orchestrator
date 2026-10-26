@@ -144,29 +144,35 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 		hostname = "unknown"
 	}
 
-	// Prepare runner binary
-	cacheDir, err := os.UserCacheDir()
-	if err != nil {
-		cacheDir = "/tmp"
+	var worker runner.Executor
+	if o.cfg.Runner.Executor == "docker" {
+		dockerWorker := runner.NewDockerWorker(o.cfg.Runner.Image, o.cfg.Runner.InstanceID, o.cfg.Runner.MemoryMB, o.cfg.Runner.CPUs, o.cfg.Runner.CacheRoot, o.cfg.Runner.CacheUID, o.cfg.Runner.CacheGID, o.logger)
+		if err := dockerWorker.Reconcile(ctx); err != nil {
+			return fmt.Errorf("reconciling stale runner containers: %w", err)
+		}
+		worker = dockerWorker
+	} else {
+		cacheDir, err := os.UserCacheDir()
+		if err != nil {
+			cacheDir = "/tmp"
+		}
+		cacheDir += "/gso"
+		mgr, err := runner.NewManager(cacheDir, o.logger)
+		if err != nil {
+			return fmt.Errorf("creating runner manager: %w", err)
+		}
+		runnerDir, err := mgr.RunnerDir(ctx)
+		if err != nil {
+			return fmt.Errorf("preparing runner binary: %w", err)
+		}
+		o.logger.Info("runner binary ready", "dir", runnerDir)
+		worker = runner.NewWorker(runnerDir, o.logger)
 	}
-	cacheDir = cacheDir + "/gso"
-
-	mgr, err := runner.NewManager(cacheDir, o.logger)
-	if err != nil {
-		return fmt.Errorf("creating runner manager: %w", err)
-	}
-
-	runnerDir, err := mgr.RunnerDir(ctx)
-	if err != nil {
-		return fmt.Errorf("preparing runner binary: %w", err)
-	}
-	o.logger.Info("runner binary ready", "dir", runnerDir)
 
 	o.mu.Lock()
 	o.sem = scaler.NewSemaphore(o.cfg.MaxRunners)
 	sem := o.sem
 	o.mu.Unlock()
-	worker := runner.NewWorker(runnerDir, o.logger)
 
 	var wg sync.WaitGroup
 	errCh := make(chan error, len(o.cfg.Repos))
@@ -202,7 +208,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	return nil
 }
 
-func (o *Orchestrator) runRepo(ctx context.Context, repo config.Repo, hostname string, worker *runner.Worker, sem *scaler.Semaphore) error {
+func (o *Orchestrator) runRepo(ctx context.Context, repo config.Repo, hostname string, worker runner.Executor, sem *scaler.Semaphore) error {
 	logger := o.logger.With("repo", repo.Name)
 	logger.Info("starting listener")
 
@@ -291,7 +297,15 @@ func (o *Orchestrator) runRepo(ctx context.Context, repo config.Repo, hostname s
 	}
 	defer func() { _ = sessionClient.Close(ctx) }()
 
-	s := scaler.New(repo.Name, ss.ID, client, worker, sem, logger, o.bus)
+	repoWorker := worker
+	if dockerWorker, ok := worker.(*runner.DockerWorker); ok {
+		cacheMode := o.cfg.Runner.Cache
+		if repo.RunnerCache != "" {
+			cacheMode = repo.RunnerCache
+		}
+		repoWorker = dockerWorker.ForRepo(repo.Name, cacheMode)
+	}
+	s := scaler.New(repo.Name, ss.ID, client, repoWorker, sem, logger, o.bus)
 
 	o.mu.Lock()
 	maxRunners := o.cfg.MaxRunners
