@@ -261,7 +261,7 @@ func (w *DockerWorker) logs(ctx context.Context, id string) error {
 		}
 		size := binary.BigEndian.Uint32(header[4:])
 		if size > 16<<20 {
-			return fmt.Errorf("Docker log frame exceeds 16 MiB")
+			return fmt.Errorf("docker log frame exceeds 16 MiB")
 		}
 		dest := io.Writer(os.Stdout)
 		if header[0] == 2 {
