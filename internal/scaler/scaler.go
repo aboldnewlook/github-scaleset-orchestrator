@@ -113,6 +113,8 @@ type Scaler struct {
 	mu           sync.Mutex
 	runners      map[string]context.CancelFunc // name -> cancel
 	releases     map[string]func()             // name -> idempotent semaphore release
+	spawnedAt    map[string]time.Time          // name -> runner creation time
+	jobStartedAt map[string]time.Time          // name -> GitHub job start callback time
 	lastDecision scaleDecision
 	hasDecision  bool
 }
@@ -126,15 +128,17 @@ type scaleDecision struct {
 
 func New(repo string, scaleSetID int, client jitConfigGenerator, worker runnerWorker, sem *Semaphore, logger *slog.Logger, bus *event.Bus) *Scaler {
 	return &Scaler{
-		repo:       repo,
-		scaleSetID: scaleSetID,
-		client:     client,
-		worker:     worker,
-		sem:        sem,
-		logger:     logger.With("repo", repo),
-		bus:        bus,
-		runners:    make(map[string]context.CancelFunc),
-		releases:   make(map[string]func()),
+		repo:         repo,
+		scaleSetID:   scaleSetID,
+		client:       client,
+		worker:       worker,
+		sem:          sem,
+		logger:       logger.With("repo", repo),
+		bus:          bus,
+		runners:      make(map[string]context.CancelFunc),
+		releases:     make(map[string]func()),
+		spawnedAt:    make(map[string]time.Time),
+		jobStartedAt: make(map[string]time.Time),
 	}
 }
 
@@ -189,6 +193,23 @@ func runnersToCreate(desired, existing, available int) int {
 
 // HandleJobStarted is called when a runner picks up a job.
 func (s *Scaler) HandleJobStarted(ctx context.Context, jobInfo *scaleset.JobStarted) error {
+	now := time.Now()
+	s.mu.Lock()
+	spawnedAt, tracked := s.spawnedAt[jobInfo.RunnerName]
+	if tracked {
+		if s.jobStartedAt == nil {
+			s.jobStartedAt = make(map[string]time.Time)
+		}
+		s.jobStartedAt[jobInfo.RunnerName] = now
+	}
+	s.mu.Unlock()
+	payload := map[string]any{
+		"job": jobInfo.JobDisplayName, "runner": jobInfo.RunnerName,
+		"workflow": jobInfo.WorkflowRunID,
+	}
+	if tracked {
+		payload["runner_startup_ms"] = now.Sub(spawnedAt).Milliseconds()
+	}
 	s.logger.Info("job started",
 		"job", jobInfo.JobDisplayName,
 		"runner", jobInfo.RunnerName,
@@ -196,14 +217,10 @@ func (s *Scaler) HandleJobStarted(ctx context.Context, jobInfo *scaleset.JobStar
 	)
 
 	s.publish(event.Event{
-		Time: time.Now(),
-		Type: event.EventJobStarted,
-		Repo: s.repo,
-		Payload: mustMarshal(map[string]any{
-			"job":      jobInfo.JobDisplayName,
-			"runner":   jobInfo.RunnerName,
-			"workflow": jobInfo.WorkflowRunID,
-		}),
+		Time:    now,
+		Type:    event.EventJobStarted,
+		Repo:    s.repo,
+		Payload: mustMarshal(payload),
 	})
 
 	return nil
@@ -211,6 +228,23 @@ func (s *Scaler) HandleJobStarted(ctx context.Context, jobInfo *scaleset.JobStar
 
 // HandleJobCompleted is called when a runner finishes a job.
 func (s *Scaler) HandleJobCompleted(ctx context.Context, jobInfo *scaleset.JobCompleted) error {
+	now := time.Now()
+	s.mu.Lock()
+	startedAt, started := s.jobStartedAt[jobInfo.RunnerName]
+	delete(s.jobStartedAt, jobInfo.RunnerName)
+	delete(s.spawnedAt, jobInfo.RunnerName)
+	cancel := s.runners[jobInfo.RunnerName]
+	release := s.releases[jobInfo.RunnerName]
+	delete(s.runners, jobInfo.RunnerName)
+	delete(s.releases, jobInfo.RunnerName)
+	s.mu.Unlock()
+	payload := map[string]any{
+		"job": jobInfo.JobDisplayName, "runner": jobInfo.RunnerName,
+		"result": jobInfo.Result, "workflow": jobInfo.WorkflowRunID,
+	}
+	if started {
+		payload["job_duration_ms"] = now.Sub(startedAt).Milliseconds()
+	}
 	s.logger.Info("job completed",
 		"job", jobInfo.JobDisplayName,
 		"runner", jobInfo.RunnerName,
@@ -218,23 +252,11 @@ func (s *Scaler) HandleJobCompleted(ctx context.Context, jobInfo *scaleset.JobCo
 	)
 
 	s.publish(event.Event{
-		Time: time.Now(),
-		Type: event.EventJobCompleted,
-		Repo: s.repo,
-		Payload: mustMarshal(map[string]any{
-			"job":      jobInfo.JobDisplayName,
-			"runner":   jobInfo.RunnerName,
-			"result":   jobInfo.Result,
-			"workflow": jobInfo.WorkflowRunID,
-		}),
+		Time:    now,
+		Type:    event.EventJobCompleted,
+		Repo:    s.repo,
+		Payload: mustMarshal(payload),
 	})
-
-	s.mu.Lock()
-	cancel := s.runners[jobInfo.RunnerName]
-	release := s.releases[jobInfo.RunnerName]
-	delete(s.runners, jobInfo.RunnerName)
-	delete(s.releases, jobInfo.RunnerName)
-	s.mu.Unlock()
 	if cancel != nil {
 		cancel()
 	}
@@ -301,10 +323,15 @@ func (s *Scaler) startRunner(ctx context.Context) error {
 	s.mu.Lock()
 	s.runners[name] = cancel
 	s.releases[name] = release
+	if s.spawnedAt == nil {
+		s.spawnedAt = make(map[string]time.Time)
+	}
+	spawnedAt := time.Now()
+	s.spawnedAt[name] = spawnedAt
 	s.mu.Unlock()
 
 	s.publish(event.Event{
-		Time: time.Now(),
+		Time: spawnedAt,
 		Type: event.EventRunnerSpawned,
 		Repo: s.repo,
 		Payload: mustMarshal(map[string]any{
@@ -319,27 +346,31 @@ func (s *Scaler) startRunner(ctx context.Context) error {
 			s.mu.Lock()
 			delete(s.runners, name)
 			delete(s.releases, name)
+			delete(s.spawnedAt, name)
+			delete(s.jobStartedAt, name)
 			s.mu.Unlock()
 		}()
 
 		if err := s.worker.Run(runnerCtx, name, jit.EncodedJITConfig); err != nil {
+			completedAt := time.Now()
 			s.logger.Error("runner failed", "name", name, "error", err)
 			s.publish(event.Event{
-				Time: time.Now(),
+				Time: completedAt,
 				Type: event.EventRunnerFailed,
 				Repo: s.repo,
 				Payload: mustMarshal(map[string]any{
-					"name":  name,
-					"error": err.Error(),
+					"name": name, "error": err.Error(),
+					"runner_elapsed_ms": completedAt.Sub(spawnedAt).Milliseconds(),
 				}),
 			})
 		} else {
+			completedAt := time.Now()
 			s.publish(event.Event{
-				Time: time.Now(),
+				Time: completedAt,
 				Type: event.EventRunnerCompleted,
 				Repo: s.repo,
 				Payload: mustMarshal(map[string]any{
-					"name": name,
+					"name": name, "runner_elapsed_ms": completedAt.Sub(spawnedAt).Milliseconds(),
 				}),
 			})
 		}

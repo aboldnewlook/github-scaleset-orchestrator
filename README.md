@@ -246,6 +246,18 @@ Planned commands (under development):
 | `health` | Check connectivity and token validity |
 | `config check` | Validate configuration file |
 
+### Job timing events
+
+The JSONL event history records `runner_startup_ms` on `job.started`, measured
+from runner creation until GitHub reports that it picked up a job. It records
+`job_duration_ms` on `job.completed`, measured between GitHub's start and
+completion callbacks. `runner.completed` and `runner.failed` include
+`runner_elapsed_ms`, measured from runner creation until its process or Docker
+container exits. These fields work with either executor and can be inspected
+with `gso log --type job.completed` or queried from `events.jsonl`.
+Missing callbacks leave the corresponding duration absent. Runner startup is
+not the time a job spent in GitHub's queue before GSO received the assignment.
+
 ## Docker Deployment
 
 ### docker-compose
