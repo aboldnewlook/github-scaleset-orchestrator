@@ -1,0 +1,18 @@
+#!/bin/sh
+set -eu
+
+if [ -z "${ACTIONS_RUNNER_INPUT_JITCONFIG:-}" ]; then
+  echo "missing JIT runner configuration" >&2
+  exit 1
+fi
+
+runner_dir=$(find /opt/gso-runner -mindepth 1 -maxdepth 1 -type d -name 'runner-*' | head -n 1)
+if [ -z "$runner_dir" ]; then
+  echo "runner binaries are missing from the job image" >&2
+  exit 1
+fi
+
+work_dir=$(mktemp -d /tmp/gso-job.XXXXXX)
+cp -a "$runner_dir"/. "$work_dir"/
+cd "$work_dir"
+exec ./run.sh

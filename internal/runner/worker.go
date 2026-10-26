@@ -17,6 +17,11 @@ type Worker struct {
 	logger    *slog.Logger
 }
 
+// Executor runs a single ephemeral runner with its JIT configuration.
+type Executor interface {
+	Run(context.Context, string, string) error
+}
+
 func NewWorker(runnerDir string, logger *slog.Logger) *Worker {
 	return &Worker{runnerDir: runnerDir, logger: logger}
 }
