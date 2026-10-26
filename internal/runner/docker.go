@@ -152,7 +152,7 @@ func (w *DockerWorker) Run(ctx context.Context, name, jit string) error {
 		return fmt.Errorf("creating runner container: %w", err)
 	}
 	if created.ID == "" {
-		return errors.New("Docker returned no container ID")
+		return errors.New("docker returned no container ID")
 	}
 	defer w.remove(created.ID)
 	w.logger.Info("runner container created", "name", name, "container", created.ID, "repo", w.repo)
@@ -219,7 +219,7 @@ func (w *DockerWorker) request(ctx context.Context, method, path string, body an
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		var failure struct {
 			Message string `json:"message"`
@@ -228,7 +228,7 @@ func (w *DockerWorker) request(ctx context.Context, method, path string, body an
 		if failure.Message == "" {
 			failure.Message = resp.Status
 		}
-		return fmt.Errorf("Docker API %s: %s", resp.Status, failure.Message)
+		return fmt.Errorf("docker API %s: %s", resp.Status, failure.Message)
 	}
 	if out != nil {
 		return json.NewDecoder(resp.Body).Decode(out)
@@ -246,9 +246,9 @@ func (w *DockerWorker) logs(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("Docker logs: %s", resp.Status)
+		return fmt.Errorf("docker logs: %s", resp.Status)
 	}
 	// Docker multiplexes stdout and stderr in 8-byte framed chunks when TTY is false.
 	for {
