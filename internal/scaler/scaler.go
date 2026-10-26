@@ -103,8 +103,18 @@ type Scaler struct {
 	logger     *slog.Logger
 	bus        *event.Bus // may be nil
 
-	mu      sync.Mutex
-	runners map[string]context.CancelFunc // name -> cancel
+	mu           sync.Mutex
+	runners      map[string]context.CancelFunc // name -> cancel
+	releases     map[string]func()             // name -> idempotent semaphore release
+	lastDecision scaleDecision
+	hasDecision  bool
+}
+
+type scaleDecision struct {
+	desired   int
+	existing  int
+	available int
+	created   int
 }
 
 func New(repo string, scaleSetID int, client *scaleset.Client, worker *runner.Worker, sem *Semaphore, logger *slog.Logger, bus *event.Bus) *Scaler {
@@ -117,22 +127,46 @@ func New(repo string, scaleSetID int, client *scaleset.Client, worker *runner.Wo
 		logger:     logger.With("repo", repo),
 		bus:        bus,
 		runners:    make(map[string]context.CancelFunc),
+		releases:   make(map[string]func()),
 	}
 }
 
 // HandleDesiredRunnerCount is called by the listener when GitHub has jobs
 // that need runners. We spawn runners up to available capacity.
 func (s *Scaler) HandleDesiredRunnerCount(ctx context.Context, count int) (int, error) {
+	s.mu.Lock()
+	existing := len(s.runners)
+	s.mu.Unlock()
 	available := s.sem.Available()
-	toCreate := min(count, available)
-
-	s.logger.Info("scaling", "desired", count, "available", available, "creating", toCreate)
-
+	// TotalAssignedJobs includes jobs already running on this scale set.
+	// Only create runners for assignments that do not have one yet.
+	toCreate := runnersToCreate(count, existing, available)
+	created := 0
 	for range toCreate {
 		if err := s.startRunner(ctx); err != nil {
 			s.logger.Error("failed to start runner", "error", err)
 			break
 		}
+		created++
+	}
+
+	decision := scaleDecision{count, existing, available, created}
+	s.mu.Lock()
+	changed := !s.hasDecision || s.lastDecision != decision
+	s.lastDecision = decision
+	s.hasDecision = true
+	s.mu.Unlock()
+	if changed {
+		s.logger.Info("scaling", "desired", count, "existing", existing, "available", available, "created", created)
+		s.publish(event.Event{
+			Time: time.Now(),
+			Type: event.EventScaleDecision,
+			Repo: s.repo,
+			Payload: mustMarshal(map[string]any{
+				"desired": count, "existing": existing,
+				"available": available, "created": created,
+			}),
+		})
 	}
 
 	s.mu.Lock()
@@ -140,6 +174,10 @@ func (s *Scaler) HandleDesiredRunnerCount(ctx context.Context, count int) (int, 
 	s.mu.Unlock()
 
 	return current, nil
+}
+
+func runnersToCreate(desired, existing, available int) int {
+	return min(max(desired-existing, 0), max(available, 0))
 }
 
 // HandleJobStarted is called when a runner picks up a job.
@@ -185,11 +223,20 @@ func (s *Scaler) HandleJobCompleted(ctx context.Context, jobInfo *scaleset.JobCo
 	})
 
 	s.mu.Lock()
-	if cancel, ok := s.runners[jobInfo.RunnerName]; ok {
-		cancel()
-		delete(s.runners, jobInfo.RunnerName)
-	}
+	cancel := s.runners[jobInfo.RunnerName]
+	release := s.releases[jobInfo.RunnerName]
+	delete(s.runners, jobInfo.RunnerName)
+	delete(s.releases, jobInfo.RunnerName)
 	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	// The listener calls HandleDesiredRunnerCount immediately after this callback.
+	// Free the completed job's slot now instead of waiting for its runner process
+	// to exit, which can leave the next assigned job queued until a later poll.
+	if release != nil {
+		release()
+	}
 
 	return nil
 }
@@ -241,9 +288,12 @@ func (s *Scaler) startRunner(ctx context.Context) error {
 	}
 
 	runnerCtx, cancel := context.WithCancel(ctx)
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(s.sem.Release) }
 
 	s.mu.Lock()
 	s.runners[name] = cancel
+	s.releases[name] = release
 	s.mu.Unlock()
 
 	s.publish(event.Event{
@@ -256,11 +306,12 @@ func (s *Scaler) startRunner(ctx context.Context) error {
 	})
 
 	go func() {
-		defer s.sem.Release()
+		defer release()
 		defer cancel()
 		defer func() {
 			s.mu.Lock()
 			delete(s.runners, name)
+			delete(s.releases, name)
 			s.mu.Unlock()
 		}()
 
