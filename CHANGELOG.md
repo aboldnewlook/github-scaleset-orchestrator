@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.0](https://github.com/aboldnewlook/github-scaleset-orchestrator/compare/v0.6.0...v0.7.0) (2026-10-26)
+
+
+### Features
+
+* isolate runner jobs in Docker sibling containers ([#33](https://github.com/aboldnewlook/github-scaleset-orchestrator/issues/33)) ([491d7f3](https://github.com/aboldnewlook/github-scaleset-orchestrator/commit/491d7f37b17f74d1b59dda9b13d24764ca291c2a))
+
 ## [0.6.0](https://github.com/aboldnewlook/github-scaleset-orchestrator/compare/v0.5.3...v0.6.0) (2026-10-26)
 
 
