@@ -2,15 +2,21 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
+	"reflect"
 	"runtime"
 	"testing"
+	"time"
 
 	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/config"
 	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/event"
 	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/naming"
 	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/scaler"
+	"github.com/actions/scaleset"
+	"github.com/actions/scaleset/listener"
+	"github.com/google/uuid"
 )
 
 func testLogger() *slog.Logger {
@@ -103,6 +109,144 @@ func TestSetMaxRunners(t *testing.T) {
 	// Verify the semaphore was actually resized.
 	if o.sem.Available() != 8 {
 		t.Fatalf("sem.Available() = %d after SetMaxRunners(8), want 8", o.sem.Available())
+	}
+}
+
+type recordingCapacitySetter struct {
+	counts []int
+}
+
+func (r *recordingCapacitySetter) SetMaxRunners(count int) {
+	r.counts = append(r.counts, count)
+}
+
+func TestSetMaxRunnersUpdatesActiveAndLateListeners(t *testing.T) {
+	o := New(&config.Config{MaxRunners: 4}, testLogger(), nil)
+	o.sem = scaler.NewSemaphore(4)
+	first := &recordingCapacitySetter{}
+	o.registerListener("org/first", nil, first)
+
+	if err := o.SetMaxRunners(8); err != nil {
+		t.Fatal(err)
+	}
+	second := &recordingCapacitySetter{}
+	o.registerListener("org/second", nil, second)
+	if err := o.SetMaxRunners(2); err != nil {
+		t.Fatal(err)
+	}
+	if got := o.sem.Max(); got != 2 {
+		t.Fatalf("semaphore max = %d, want 2", got)
+	}
+	if !reflect.DeepEqual(first.counts, []int{4, 8, 2}) {
+		t.Fatalf("first listener capacities = %v, want [4 8 2]", first.counts)
+	}
+	if !reflect.DeepEqual(second.counts, []int{8, 2}) {
+		t.Fatalf("late listener capacities = %v, want [8 2]", second.counts)
+	}
+
+	o.unregisterListener("org/first")
+	if err := o.SetMaxRunners(3); err != nil {
+		t.Fatal(err)
+	}
+	if len(first.counts) != 3 || second.counts[len(second.counts)-1] != 3 {
+		t.Fatalf("unregistered listener changed or active listener missed update: first=%v second=%v", first.counts, second.counts)
+	}
+	if err := o.SetMaxRunners(0); err == nil {
+		t.Fatal("expected invalid capacity to be rejected")
+	}
+	if got := o.MaxRunners(); got != 3 {
+		t.Fatalf("capacity changed after invalid update: got %d, want 3", got)
+	}
+}
+
+type pollingScaleSetClient struct {
+	capacities chan int
+	nextPoll   chan struct{}
+}
+
+func (p *pollingScaleSetClient) Session() scaleset.RunnerScaleSetSession {
+	return scaleset.RunnerScaleSetSession{
+		SessionID:  uuid.New(),
+		Statistics: &scaleset.RunnerScaleSetStatistic{},
+	}
+}
+
+func (p *pollingScaleSetClient) GetMessage(ctx context.Context, _, capacity int) (*scaleset.RunnerScaleSetMessage, error) {
+	select {
+	case p.capacities <- capacity:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	select {
+	case <-p.nextPoll:
+		return nil, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (*pollingScaleSetClient) DeleteMessage(context.Context, int) error { return nil }
+
+type noOpScaleSetScaler struct{}
+
+func (noOpScaleSetScaler) HandleDesiredRunnerCount(context.Context, int) (int, error) {
+	return 0, nil
+}
+func (noOpScaleSetScaler) HandleJobStarted(context.Context, *scaleset.JobStarted) error {
+	return nil
+}
+func (noOpScaleSetScaler) HandleJobCompleted(context.Context, *scaleset.JobCompleted) error {
+	return nil
+}
+
+func TestSetMaxRunnersChangesAdvertisedCapacityOnNextPoll(t *testing.T) {
+	client := &pollingScaleSetClient{
+		capacities: make(chan int, 3),
+		nextPoll:   make(chan struct{}),
+	}
+	l, err := listener.New(client, listener.Config{ScaleSetID: 42, MaxRunners: 4, Logger: testLogger()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := New(&config.Config{MaxRunners: 4}, testLogger(), nil)
+	o.sem = scaler.NewSemaphore(4)
+	o.registerListener("org/repo", nil, l)
+	defer o.unregisterListener("org/repo")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- l.Run(ctx, noOpScaleSetScaler{}) }()
+
+	wantCapacity := func(want int) {
+		t.Helper()
+		select {
+		case got := <-client.capacities:
+			if got != want {
+				t.Fatalf("advertised capacity = %d, want %d", got, want)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("listener did not poll with capacity %d", want)
+		}
+	}
+	wantCapacity(4)
+	if err := o.SetMaxRunners(7); err != nil {
+		t.Fatal(err)
+	}
+	client.nextPoll <- struct{}{}
+	wantCapacity(7)
+	if err := o.SetMaxRunners(2); err != nil {
+		t.Fatal(err)
+	}
+	client.nextPoll <- struct{}{}
+	wantCapacity(2)
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("listener exited with %v, want context cancellation", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("listener did not exit after cancellation")
 	}
 }
 
