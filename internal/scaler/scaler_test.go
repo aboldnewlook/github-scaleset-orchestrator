@@ -3,11 +3,14 @@ package scaler
 import (
 	"context"
 	"encoding/json"
+	"io"
+	"log/slog"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/event"
+	"github.com/actions/scaleset"
 )
 
 func TestNewSemaphore(t *testing.T) {
@@ -171,6 +174,197 @@ func TestSemaphoreConcurrency(t *testing.T) {
 
 	if maxSeen > 3 {
 		t.Fatalf("max concurrent = %d, want <= 3", maxSeen)
+	}
+}
+
+func TestRunnersToCreate(t *testing.T) {
+	tests := []struct {
+		name      string
+		desired   int
+		existing  int
+		available int
+		want      int
+	}{
+		{"one job already has a runner", 1, 1, 3, 0},
+		{"fill missing runners", 5, 3, 2, 2},
+		{"respect global capacity", 5, 1, 1, 1},
+		{"do not create after demand drops", 0, 1, 3, 0},
+		{"do not create when over capacity", 5, 1, -1, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := runnersToCreate(tt.desired, tt.existing, tt.available); got != tt.want {
+				t.Fatalf("runnersToCreate(%d, %d, %d) = %d, want %d", tt.desired, tt.existing, tt.available, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestScaleDecisionRecordsChangesWithoutRepeatingIdlePolls(t *testing.T) {
+	bus := event.NewBus(nil)
+	id, events := bus.Subscribe(8)
+	defer bus.Unsubscribe(id)
+	sem := NewSemaphore(4)
+	if err := sem.Acquire(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	s := &Scaler{
+		repo:    "org/repo",
+		sem:     sem,
+		logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		bus:     bus,
+		runners: map[string]context.CancelFunc{"already-running": func() {}},
+	}
+
+	for range 2 {
+		if got, err := s.HandleDesiredRunnerCount(context.Background(), 1); err != nil || got != 1 {
+			t.Fatalf("HandleDesiredRunnerCount() = (%d, %v), want (1, nil)", got, err)
+		}
+	}
+	select {
+	case got := <-events:
+		if got.Type != event.EventScaleDecision || got.Repo != "org/repo" {
+			t.Fatalf("unexpected event: %+v", got)
+		}
+		var payload map[string]int
+		if err := json.Unmarshal(got.Payload, &payload); err != nil {
+			t.Fatal(err)
+		}
+		for key, want := range map[string]int{"desired": 1, "existing": 1, "available": 3, "created": 0} {
+			if payload[key] != want {
+				t.Errorf("%s = %d, want %d", key, payload[key], want)
+			}
+		}
+	default:
+		t.Fatal("expected scale decision event")
+	}
+	select {
+	case got := <-events:
+		t.Fatalf("duplicate decision on unchanged poll: %+v", got)
+	default:
+	}
+}
+
+func TestJobCompletedReleasesCapacityBeforeNextScaleDecision(t *testing.T) {
+	sem := NewSemaphore(1)
+	if err := sem.Acquire(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var once sync.Once
+	release := func() { once.Do(sem.Release) }
+	cancelled := false
+	s := &Scaler{
+		repo:     "org/repo",
+		sem:      sem,
+		logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		runners:  map[string]context.CancelFunc{"done": func() { cancelled = true }},
+		releases: map[string]func(){"done": release},
+	}
+	if err := s.HandleJobCompleted(context.Background(), &scaleset.JobCompleted{RunnerName: "done"}); err != nil {
+		t.Fatal(err)
+	}
+	if !cancelled {
+		t.Fatal("completed runner was not cancelled")
+	}
+	if got := sem.Available(); got != 1 {
+		t.Fatalf("available capacity = %d immediately after completion, want 1", got)
+	}
+	if got := runnersToCreate(1, len(s.Runners()), sem.Available()); got != 1 {
+		t.Fatalf("next scale decision would create %d runners, want 1", got)
+	}
+	// The worker also releases on process exit; that must not free the slot twice.
+	release()
+	if got := sem.Available(); got != 1 {
+		t.Fatalf("available capacity after worker exit = %d, want 1", got)
+	}
+}
+
+type fakeJITConfigGenerator struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (f *fakeJITConfigGenerator) GenerateJitRunnerConfig(_ context.Context, _ *scaleset.RunnerScaleSetJitRunnerSetting, _ int) (*scaleset.RunnerScaleSetJitRunnerConfig, error) {
+	f.mu.Lock()
+	f.calls++
+	f.mu.Unlock()
+	return &scaleset.RunnerScaleSetJitRunnerConfig{EncodedJITConfig: "test"}, nil
+}
+
+func (f *fakeJITConfigGenerator) Calls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
+}
+
+type controlledWorker struct {
+	mu            sync.Mutex
+	calls         int
+	started       chan string
+	firstExitGate chan struct{}
+}
+
+func (w *controlledWorker) Run(ctx context.Context, name, _ string) error {
+	w.mu.Lock()
+	w.calls++
+	first := w.calls == 1
+	w.mu.Unlock()
+	w.started <- name
+	<-ctx.Done()
+	if first {
+		<-w.firstExitGate
+	}
+	return ctx.Err()
+}
+
+func TestCompletedRunnerHandsCapacityToNextAssignedJob(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	client := &fakeJITConfigGenerator{}
+	worker := &controlledWorker{
+		started:       make(chan string, 2),
+		firstExitGate: make(chan struct{}),
+	}
+	t.Cleanup(func() {
+		cancel()
+		close(worker.firstExitGate)
+	})
+	sem := NewSemaphore(1)
+	s := New("org/repo", 42, client, worker, sem, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
+
+	if _, err := s.HandleDesiredRunnerCount(ctx, 1); err != nil {
+		t.Fatal(err)
+	}
+	first := <-worker.started
+	if _, err := s.HandleDesiredRunnerCount(ctx, 1); err != nil {
+		t.Fatal(err)
+	}
+	if got := client.Calls(); got != 1 {
+		t.Fatalf("duplicate scale callback generated %d JIT configs, want 1", got)
+	}
+
+	if err := s.HandleJobCompleted(ctx, &scaleset.JobCompleted{RunnerName: first}); err != nil {
+		t.Fatal(err)
+	}
+	// The first worker remains blocked in its exit path. The next assigned job
+	// must still be able to take the slot immediately.
+	if got := sem.Available(); got != 1 {
+		t.Fatalf("capacity after completion = %d, want 1", got)
+	}
+	nextCtx, nextCancel := context.WithTimeout(ctx, time.Second)
+	defer nextCancel()
+	if _, err := s.HandleDesiredRunnerCount(nextCtx, 1); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case second := <-worker.started:
+		if second == first {
+			t.Fatal("replacement runner reused the completed runner name")
+		}
+	case <-nextCtx.Done():
+		t.Fatal("replacement runner did not start while previous worker exited")
+	}
+	if got := client.Calls(); got != 2 {
+		t.Fatalf("JIT configs generated = %d, want 2", got)
 	}
 }
 

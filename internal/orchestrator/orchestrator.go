@@ -29,16 +29,24 @@ type Orchestrator struct {
 	bus    *event.Bus // may be nil
 	sem    *scaler.Semaphore
 
-	mu      sync.Mutex
-	scalers map[string]*scaler.Scaler // keyed by repo name
+	mu        sync.Mutex
+	scalers   map[string]*scaler.Scaler // keyed by repo name
+	listeners map[string]capacitySetter
+}
+
+// capacitySetter is implemented by the scale-set listener. Keeping only its
+// capacity control here lets the orchestrator update every active listener.
+type capacitySetter interface {
+	SetMaxRunners(int)
 }
 
 func New(cfg *config.Config, logger *slog.Logger, bus *event.Bus) *Orchestrator {
 	return &Orchestrator{
-		cfg:     cfg,
-		logger:  logger,
-		bus:     bus,
-		scalers: make(map[string]*scaler.Scaler),
+		cfg:       cfg,
+		logger:    logger,
+		bus:       bus,
+		scalers:   make(map[string]*scaler.Scaler),
+		listeners: make(map[string]capacitySetter),
 	}
 }
 
@@ -56,28 +64,44 @@ func (o *Orchestrator) RunnersByRepo() map[string][]string {
 
 // Semaphore returns the orchestrator's semaphore for capacity queries.
 func (o *Orchestrator) Semaphore() *scaler.Semaphore {
+	o.mu.Lock()
+	defer o.mu.Unlock()
 	return o.sem
 }
 
 // MaxRunners returns the configured maximum concurrent runners.
 func (o *Orchestrator) MaxRunners() int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
 	return o.cfg.MaxRunners
 }
 
 // AvailableSlots returns the number of free runner slots.
 func (o *Orchestrator) AvailableSlots() int {
-	if o.sem == nil {
-		return o.cfg.MaxRunners
+	o.mu.Lock()
+	sem := o.sem
+	maxRunners := o.cfg.MaxRunners
+	o.mu.Unlock()
+	if sem == nil {
+		return maxRunners
 	}
-	return o.sem.Available()
+	return sem.Available()
 }
 
 // SetMaxRunners updates the concurrency cap at runtime.
 // Note: this does not persist across restarts.
 func (o *Orchestrator) SetMaxRunners(count int) error {
+	if count < 1 {
+		return fmt.Errorf("max runners must be at least 1")
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
 	o.cfg.MaxRunners = count
 	if o.sem != nil {
 		o.sem.Resize(count)
+	}
+	for _, l := range o.listeners {
+		l.SetMaxRunners(count)
 	}
 	return nil
 }
@@ -138,7 +162,10 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	}
 	o.logger.Info("runner binary ready", "dir", runnerDir)
 
+	o.mu.Lock()
 	o.sem = scaler.NewSemaphore(o.cfg.MaxRunners)
+	sem := o.sem
+	o.mu.Unlock()
 	worker := runner.NewWorker(runnerDir, o.logger)
 
 	var wg sync.WaitGroup
@@ -148,7 +175,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := o.runRepo(ctx, repo, hostname, worker, o.sem); err != nil {
+			if err := o.runRepo(ctx, repo, hostname, worker, sem); err != nil {
 				o.logger.Error("repo listener failed", "repo", repo.Name, "error", err)
 				errCh <- fmt.Errorf("%s: %w", repo.Name, err)
 			}
@@ -266,21 +293,38 @@ func (o *Orchestrator) runRepo(ctx context.Context, repo config.Repo, hostname s
 
 	s := scaler.New(repo.Name, ss.ID, client, worker, sem, logger, o.bus)
 
-	// Store the scaler in the map
 	o.mu.Lock()
-	o.scalers[repo.Name] = s
+	maxRunners := o.cfg.MaxRunners
 	o.mu.Unlock()
-
 	l, err := listener.New(sessionClient, listener.Config{
 		ScaleSetID: ss.ID,
-		MaxRunners: o.cfg.MaxRunners,
+		MaxRunners: maxRunners,
 		Logger:     logger,
 	})
 	if err != nil {
 		return fmt.Errorf("creating listener: %w", err)
 	}
 
+	o.registerListener(repo.Name, s, l)
+	defer o.unregisterListener(repo.Name)
+
 	return l.Run(ctx, s)
+}
+
+func (o *Orchestrator) registerListener(repo string, s *scaler.Scaler, l capacitySetter) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	// Capacity may have changed while the listener was being created.
+	l.SetMaxRunners(o.cfg.MaxRunners)
+	o.scalers[repo] = s
+	o.listeners[repo] = l
+}
+
+func (o *Orchestrator) unregisterListener(repo string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	delete(o.scalers, repo)
+	delete(o.listeners, repo)
 }
 
 // publish sends an event to the bus if configured.
