@@ -279,6 +279,106 @@ func TestJobCompletedReleasesCapacityBeforeNextScaleDecision(t *testing.T) {
 	}
 }
 
+func TestJobEventsIncludeMeasuredDurations(t *testing.T) {
+	bus := event.NewBus(nil)
+	id, events := bus.Subscribe(2)
+	defer bus.Unsubscribe(id)
+	s := &Scaler{
+		repo: "org/repo", logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		bus: bus, spawnedAt: map[string]time.Time{"runner-1": time.Now().Add(-3 * time.Second)},
+		runners: map[string]context.CancelFunc{"runner-1": func() {}},
+	}
+	if err := s.HandleJobStarted(context.Background(), &scaleset.JobStarted{RunnerName: "runner-1"}); err != nil {
+		t.Fatal(err)
+	}
+	started := <-events
+	var startedPayload map[string]any
+	if err := json.Unmarshal(started.Payload, &startedPayload); err != nil {
+		t.Fatal(err)
+	}
+	if got := startedPayload["runner_startup_ms"].(float64); got < 2900 || got > 4000 {
+		t.Fatalf("runner startup = %v ms, want about 3000", got)
+	}
+
+	s.mu.Lock()
+	s.jobStartedAt["runner-1"] = time.Now().Add(-2 * time.Second)
+	s.mu.Unlock()
+	if err := s.HandleJobCompleted(context.Background(), &scaleset.JobCompleted{RunnerName: "runner-1"}); err != nil {
+		t.Fatal(err)
+	}
+	completed := <-events
+	var completedPayload map[string]any
+	if err := json.Unmarshal(completed.Payload, &completedPayload); err != nil {
+		t.Fatal(err)
+	}
+	if got := completedPayload["job_duration_ms"].(float64); got < 1900 || got > 3000 {
+		t.Fatalf("job duration = %v ms, want about 2000", got)
+	}
+	if len(s.spawnedAt) != 0 || len(s.jobStartedAt) != 0 {
+		t.Fatal("timing state retained after job completion")
+	}
+}
+
+func TestUnknownJobEventsOmitUnmeasuredDurations(t *testing.T) {
+	bus := event.NewBus(nil)
+	id, events := bus.Subscribe(2)
+	defer bus.Unsubscribe(id)
+	s := &Scaler{repo: "org/repo", logger: slog.New(slog.NewTextHandler(io.Discard, nil)), bus: bus}
+	if err := s.HandleJobStarted(context.Background(), &scaleset.JobStarted{RunnerName: "unknown"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.HandleJobCompleted(context.Background(), &scaleset.JobCompleted{RunnerName: "unknown"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"runner_startup_ms", "job_duration_ms"} {
+		e := <-events
+		var payload map[string]any
+		if err := json.Unmarshal(e.Payload, &payload); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := payload[key]; ok {
+			t.Fatalf("%s event has unmeasured %s", e.Type, key)
+		}
+	}
+}
+
+type workerFunc func(context.Context, string, string) error
+
+func (f workerFunc) Run(ctx context.Context, name, jit string) error { return f(ctx, name, jit) }
+
+func TestRunnerExitEventIncludesElapsedTime(t *testing.T) {
+	bus := event.NewBus(nil)
+	id, events := bus.Subscribe(4)
+	defer bus.Unsubscribe(id)
+	s := New("org/repo", 42, &fakeJITConfigGenerator{},
+		workerFunc(func(context.Context, string, string) error {
+			time.Sleep(20 * time.Millisecond)
+			return nil
+		}), NewSemaphore(1), slog.New(slog.NewTextHandler(io.Discard, nil)), bus)
+	if _, err := s.HandleDesiredRunnerCount(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	timeout := time.After(time.Second)
+	for {
+		select {
+		case e := <-events:
+			if e.Type != event.EventRunnerCompleted {
+				continue
+			}
+			var payload map[string]any
+			if err := json.Unmarshal(e.Payload, &payload); err != nil {
+				t.Fatal(err)
+			}
+			if got := payload["runner_elapsed_ms"].(float64); got < 20 {
+				t.Fatalf("runner elapsed = %v ms, want at least 20", got)
+			}
+			return
+		case <-timeout:
+			t.Fatal("runner completion event not received")
+		}
+	}
+}
+
 type fakeJITConfigGenerator struct {
 	mu    sync.Mutex
 	calls int
