@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.0](https://github.com/aboldnewlook/github-scaleset-orchestrator/compare/v0.7.0...v0.8.0) (2026-10-26)
+
+
+### Features
+
+* record runner and job timing events ([#35](https://github.com/aboldnewlook/github-scaleset-orchestrator/issues/35)) ([8c4c5e6](https://github.com/aboldnewlook/github-scaleset-orchestrator/commit/8c4c5e6bda1ecd3c109438050462ce21e6feba3e))
+
 ## [0.7.0](https://github.com/aboldnewlook/github-scaleset-orchestrator/compare/v0.6.0...v0.7.0) (2026-10-26)
 
 
