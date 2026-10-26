@@ -279,6 +279,95 @@ func TestJobCompletedReleasesCapacityBeforeNextScaleDecision(t *testing.T) {
 	}
 }
 
+type fakeJITConfigGenerator struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (f *fakeJITConfigGenerator) GenerateJitRunnerConfig(_ context.Context, _ *scaleset.RunnerScaleSetJitRunnerSetting, _ int) (*scaleset.RunnerScaleSetJitRunnerConfig, error) {
+	f.mu.Lock()
+	f.calls++
+	f.mu.Unlock()
+	return &scaleset.RunnerScaleSetJitRunnerConfig{EncodedJITConfig: "test"}, nil
+}
+
+func (f *fakeJITConfigGenerator) Calls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
+}
+
+type controlledWorker struct {
+	mu            sync.Mutex
+	calls         int
+	started       chan string
+	firstExitGate chan struct{}
+}
+
+func (w *controlledWorker) Run(ctx context.Context, name, _ string) error {
+	w.mu.Lock()
+	w.calls++
+	first := w.calls == 1
+	w.mu.Unlock()
+	w.started <- name
+	<-ctx.Done()
+	if first {
+		<-w.firstExitGate
+	}
+	return ctx.Err()
+}
+
+func TestCompletedRunnerHandsCapacityToNextAssignedJob(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	client := &fakeJITConfigGenerator{}
+	worker := &controlledWorker{
+		started:       make(chan string, 2),
+		firstExitGate: make(chan struct{}),
+	}
+	t.Cleanup(func() {
+		cancel()
+		close(worker.firstExitGate)
+	})
+	sem := NewSemaphore(1)
+	s := New("org/repo", 42, client, worker, sem, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
+
+	if _, err := s.HandleDesiredRunnerCount(ctx, 1); err != nil {
+		t.Fatal(err)
+	}
+	first := <-worker.started
+	if _, err := s.HandleDesiredRunnerCount(ctx, 1); err != nil {
+		t.Fatal(err)
+	}
+	if got := client.Calls(); got != 1 {
+		t.Fatalf("duplicate scale callback generated %d JIT configs, want 1", got)
+	}
+
+	if err := s.HandleJobCompleted(ctx, &scaleset.JobCompleted{RunnerName: first}); err != nil {
+		t.Fatal(err)
+	}
+	// The first worker remains blocked in its exit path. The next assigned job
+	// must still be able to take the slot immediately.
+	if got := sem.Available(); got != 1 {
+		t.Fatalf("capacity after completion = %d, want 1", got)
+	}
+	nextCtx, nextCancel := context.WithTimeout(ctx, time.Second)
+	defer nextCancel()
+	if _, err := s.HandleDesiredRunnerCount(nextCtx, 1); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case second := <-worker.started:
+		if second == first {
+			t.Fatal("replacement runner reused the completed runner name")
+		}
+	case <-nextCtx.Done():
+		t.Fatal("replacement runner did not start while previous worker exited")
+	}
+	if got := client.Calls(); got != 2 {
+		t.Fatalf("JIT configs generated = %d, want 2", got)
+	}
+}
+
 func TestScalerRunners(t *testing.T) {
 	s := &Scaler{
 		runners: make(map[string]context.CancelFunc),

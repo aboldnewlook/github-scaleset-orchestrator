@@ -10,10 +10,17 @@ import (
 	"time"
 
 	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/event"
-	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/runner"
 	"github.com/actions/scaleset"
 	"github.com/google/uuid"
 )
+
+type jitConfigGenerator interface {
+	GenerateJitRunnerConfig(context.Context, *scaleset.RunnerScaleSetJitRunnerSetting, int) (*scaleset.RunnerScaleSetJitRunnerConfig, error)
+}
+
+type runnerWorker interface {
+	Run(context.Context, string, string) error
+}
 
 // Semaphore controls global concurrency across all repos.
 // It supports context-aware Acquire and runtime Resize.
@@ -97,8 +104,8 @@ func (s *Semaphore) Max() int {
 type Scaler struct {
 	repo       string
 	scaleSetID int
-	client     *scaleset.Client
-	worker     *runner.Worker
+	client     jitConfigGenerator
+	worker     runnerWorker
 	sem        *Semaphore
 	logger     *slog.Logger
 	bus        *event.Bus // may be nil
@@ -117,7 +124,7 @@ type scaleDecision struct {
 	created   int
 }
 
-func New(repo string, scaleSetID int, client *scaleset.Client, worker *runner.Worker, sem *Semaphore, logger *slog.Logger, bus *event.Bus) *Scaler {
+func New(repo string, scaleSetID int, client jitConfigGenerator, worker runnerWorker, sem *Semaphore, logger *slog.Logger, bus *event.Bus) *Scaler {
 	return &Scaler{
 		repo:       repo,
 		scaleSetID: scaleSetID,
