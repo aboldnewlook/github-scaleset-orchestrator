@@ -3,6 +3,7 @@ module github.com/aboldnewlook/github-scaleset-orchestrator
 go 1.27.3
 
 require (
+	connectrpc.com/connect v1.21.1
 	github.com/actions/scaleset v0.2.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
@@ -11,6 +12,7 @@ require (
 	github.com/spf13/viper v1.21.0
 	github.com/zalando/go-keyring v0.2.8
 	golang.org/x/term v0.41.0
+	google.golang.org/protobuf v1.36.12
 )
 
 require (
@@ -47,4 +49,9 @@ require (
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
 	golang.org/x/sys v0.42.0 // indirect
 	golang.org/x/text v0.31.0 // indirect
+)
+
+tool (
+	connectrpc.com/connect/cmd/protoc-gen-connect-go
+	google.golang.org/protobuf/cmd/protoc-gen-go
 )
