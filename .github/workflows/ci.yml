@@ -33,6 +33,35 @@ jobs:
         run: |
           "$(go env GOPATH)/bin/golangci-lint" run ./...
 
+  proto:
+    name: Proto
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Install buf
+        run: go install github.com/bufbuild/buf/cmd/buf@v1.69.0
+      - name: Lint
+        run: buf lint
+      - name: Generated code is current
+        run: |
+          buf generate
+          git diff --exit-code -- gen
+          test -z "$(git status --porcelain -- gen)"
+      - name: No breaking changes against main
+        # gso is public, so the remote URL needs no credentials. A PR checkout
+        # has no local "main" branch, which is why .git#branch=main is not used.
+        run: |
+          if git cat-file -e origin/main:proto/gso/worker/v1/worker.proto 2>/dev/null; then
+            buf breaking --against "https://github.com/${GITHUB_REPOSITORY}.git#branch=main"
+          else
+            echo "main has no gso.worker.v1 proto yet; skipping buf breaking"
+          fi
+
   security:
     name: Security
     runs-on: ubuntu-latest

@@ -11,6 +11,34 @@ tasks:
     cmds:
       - go-actions check test
 
+  generate:
+    desc: Regenerate gen/ from proto/ (buf on PATH, else go run buf@v1.69.0)
+    cmds:
+      - sh -c 'if command -v buf >/dev/null 2>&1; then buf generate; else go run github.com/bufbuild/buf/cmd/buf@v1.69.0 generate; fi'
+
+  generate:check:
+    desc: Fail if gen/ is out of date with proto/
+    cmds:
+      - task: generate
+      - git diff --exit-code -- gen
+      - |
+        sh -c 'test -z "$(git status --porcelain -- gen)" || { git status --porcelain -- gen; echo "gen/ is stale, run task generate"; exit 1; }'
+
+  proto:lint:
+    desc: Lint proto/ with buf (STANDARD)
+    cmds:
+      - sh -c 'if command -v buf >/dev/null 2>&1; then buf lint; else go run github.com/bufbuild/buf/cmd/buf@v1.69.0 lint; fi'
+
+  test:docker:
+    desc: Docker-backed integration tests (needs a local Docker engine; GSO_DOCKER_HOST optional)
+    cmds:
+      - GSO_DOCKER_IT=1 go test -race -run Integration ./runner/... ./worker/...
+
+  test:e2e:
+    desc: End-to-end tests (router + in-process workers against the simulated GitHub)
+    cmds:
+      - go test -race -count=1 ./internal/e2e/...
+
   runner:bump:
     desc: Pin the GitHub Actions runner (default latest; pass a version after --). Rewrites runner/pin.json.
     cmds:
