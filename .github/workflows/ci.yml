@@ -41,3 +41,18 @@ jobs:
       - uses: jrschumacher/go-actions/ci@v3
         with:
           job: security
+
+  cross:
+    name: Cross-compile release targets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build every goreleaser target
+        run: |
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64; do
+            echo "building $target"
+            GOOS=${target%/*} GOARCH=${target#*/} CGO_ENABLED=0 go build -o /dev/null . || exit 1
+          done
