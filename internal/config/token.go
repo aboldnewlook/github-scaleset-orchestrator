@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 
 	"github.com/zalando/go-keyring"
@@ -41,10 +42,8 @@ func (ts *TokenSource) Resolve() (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("reading token file %q: %w", ts.File, err)
 		}
-		if info, statErr := os.Stat(ts.File); statErr == nil {
-			if perm := info.Mode().Perm(); perm&0077 != 0 {
-				fmt.Fprintf(os.Stderr, "warning: token file %s has permissions %04o, should be 0600 or stricter\n", ts.File, perm)
-			}
+		if err := checkTokenFilePrivate(ts.File); err != nil {
+			return "", err
 		}
 		token := strings.TrimSpace(string(data))
 		if token != "" {
@@ -53,6 +52,23 @@ func (ts *TokenSource) Resolve() (string, error) {
 	}
 
 	return "", nil
+}
+
+// checkTokenFilePrivate refuses a token file that group or others can access.
+// Windows has no POSIX mode bits (Go reports 0666 or 0444 there), so the check
+// is skipped on Windows; protect the file with an ACL instead.
+func checkTokenFilePrivate(path string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("checking token file %q: %w", path, err)
+	}
+	if perm := info.Mode().Perm(); perm&0o077 != 0 {
+		return fmt.Errorf("token file %q has permissions %04o; it must not be readable by group or others (chmod 600 %s)", path, perm, path)
+	}
+	return nil
 }
 
 // StoreInKeychain saves a token to the OS keychain.

@@ -185,7 +185,7 @@ func TestTokenForRepo_EnvVar(t *testing.T) {
 func TestTokenForRepo_File(t *testing.T) {
 	dir := t.TempDir()
 	tokenFile := filepath.Join(dir, "token")
-	if err := os.WriteFile(tokenFile, []byte("  file-tok-789\n"), 0o644); err != nil {
+	if err := os.WriteFile(tokenFile, []byte("  file-tok-789\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -237,7 +237,7 @@ func TestTokenForRepo_EnvVarPrecedence(t *testing.T) {
 	// Env var takes precedence over file
 	dir := t.TempDir()
 	tokenFile := filepath.Join(dir, "token")
-	if err := os.WriteFile(tokenFile, []byte("file-tok"), 0o644); err != nil {
+	if err := os.WriteFile(tokenFile, []byte("file-tok"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -309,7 +309,7 @@ func TestResolve_EmptyEnvVar(t *testing.T) {
 func TestResolve_EmptyTokenFile(t *testing.T) {
 	dir := t.TempDir()
 	tokenFile := filepath.Join(dir, "empty_token")
-	if err := os.WriteFile(tokenFile, []byte("   \n"), 0o644); err != nil {
+	if err := os.WriteFile(tokenFile, []byte("   \n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 

@@ -51,7 +51,7 @@ Tokens can be stored in three locations, resolved in priority order:
 
    The keychain is the recommended storage for interactive use. Tokens are encrypted at rest.
 
-3. **File** (`file`): The token is read from a file. Suitable for Docker secrets (`/run/secrets/...`), HashiCorp Vault agent, or other secret injection mechanisms. Ensure the file has restrictive permissions (`0600`).
+3. **File** (`file`): The token is read from a file. Suitable for Docker secrets (`/run/secrets/...`), HashiCorp Vault agent, or other secret injection mechanisms. gso refuses a token file that group or others can read (anything looser than `0600`); fix it with `chmod 600 <file>`. Compose file secrets are bind mounts, so they keep the host file's mode and owner: make the host file `0600` and owned by uid 1001, the image's `runner` user. Swarm and Kubernetes secrets default to `0444` and must set `mode: 0400` (Swarm) or `defaultMode: 0400` (Kubernetes). The check is skipped on Windows, which has no POSIX mode bits.
 
 ### Resolution
 

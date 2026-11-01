@@ -180,7 +180,7 @@ gso token -set <account-name>
 
 Supported backends: macOS Keychain, GNOME Keyring (Linux), Windows Credential Manager.
 
-**File:** Set `file` to a path. The file should contain just the token (whitespace is trimmed). Useful for Docker secrets or Vault agent.
+**File:** Set `file` to a path. The file should contain just the token (whitespace is trimmed). Useful for Docker secrets or Vault agent. gso refuses the file if group or others can read it (`chmod 600`).
 
 ## Security Considerations
 

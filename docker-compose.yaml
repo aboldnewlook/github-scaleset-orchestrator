@@ -14,6 +14,8 @@ services:
     # In config.yaml, set:
     #   auth:
     #     file: /run/secrets/gh_token
+    # gso refuses token files readable by group or others. On the host:
+    #   chmod 600 gh_token.txt && sudo chown 1001 gh_token.txt   # 1001 = the image's runner user
 
 # secrets:
 #   gh_token:
