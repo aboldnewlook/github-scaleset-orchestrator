@@ -1,6 +1,6 @@
 module github.com/aboldnewlook/github-scaleset-orchestrator
 
-go 1.26.1
+go 1.27.3
 
 require (
 	github.com/actions/scaleset v0.2.0

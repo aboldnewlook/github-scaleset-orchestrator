@@ -10,7 +10,7 @@ ci:
             threshold: 0
     lint:
         enabled: true
-        version: v2.0.2
+        version: v2.15.0
         args: run ./...
     benchmark:
         args: -bench=. -benchmem

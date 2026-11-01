@@ -15,7 +15,7 @@ go run . -config config.yaml   # Run the orchestrator
 
 - `config.yaml` is gitignored -- it contains token references. Use `config.example.yaml` as a template.
 - The project depends on `actions/scaleset` v0.2.0 (the Scale Set API client/listener library).
-- Go version: 1.26.1
+- Go version: 1.27.3 (floor set by actions/scaleset v0.5.0, adopted in P2a)
 - Targets: macOS (native) and Linux (Docker)
 
 ## Key Packages
