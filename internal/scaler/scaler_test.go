@@ -3,6 +3,7 @@ package scaler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"sync"
@@ -610,5 +611,44 @@ func TestMustMarshal(t *testing.T) {
 				t.Fatalf("result is not valid JSON: %s", result)
 			}
 		})
+	}
+}
+
+type failingJITConfigGenerator struct{}
+
+func (failingJITConfigGenerator) GenerateJitRunnerConfig(context.Context, *scaleset.RunnerScaleSetJitRunnerSetting, int) (*scaleset.RunnerScaleSetJitRunnerConfig, error) {
+	return nil, errors.New("github: 500")
+}
+
+func TestStartRunnerDoesNotMintWithoutAFreeSlot(t *testing.T) {
+	client := &fakeJITConfigGenerator{}
+	sem := NewSemaphore(1)
+	if err := sem.Acquire(context.Background()); err != nil { // the only slot is taken
+		t.Fatal(err)
+	}
+	idle := workerFunc(func(context.Context, string, string) error { return nil })
+	s := New("org/repo", 42, client, idle, sem, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if err := s.startRunner(ctx); err == nil {
+		t.Fatal("startRunner() succeeded without a free slot")
+	}
+	if got := client.Calls(); got != 0 {
+		t.Fatalf("minted %d JIT configs while no slot was free, want 0", got)
+	}
+}
+
+func TestStartRunnerReturnsSlotWhenMintFails(t *testing.T) {
+	sem := NewSemaphore(1)
+	idle := workerFunc(func(context.Context, string, string) error { return nil })
+	s := New("org/repo", 42, failingJITConfigGenerator{}, idle, sem, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
+	if err := s.startRunner(context.Background()); err == nil {
+		t.Fatal("startRunner() succeeded although minting failed")
+	}
+	if got := sem.Available(); got != 1 {
+		t.Fatalf("Available() = %d after a failed mint, want 1", got)
+	}
+	if got := len(s.Runners()); got != 0 {
+		t.Fatalf("runners = %d after a failed mint, want 0", got)
 	}
 }

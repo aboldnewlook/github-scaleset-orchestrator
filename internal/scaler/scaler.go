@@ -304,16 +304,19 @@ func (s *Scaler) startRunner(ctx context.Context) error {
 	}
 	name := fmt.Sprintf("gso-%s-%s", repoShort, uuid.NewString()[:8])
 
+	// Reserve the slot first: a JIT config is a live credential and must only
+	// be minted for a runner that is certain to start (design spec F8, §5.2).
+	if err := s.sem.Acquire(ctx); err != nil {
+		return fmt.Errorf("acquiring semaphore: %w", err)
+	}
+
 	jit, err := s.client.GenerateJitRunnerConfig(ctx,
 		&scaleset.RunnerScaleSetJitRunnerSetting{Name: name},
 		s.scaleSetID,
 	)
 	if err != nil {
+		s.sem.Release()
 		return fmt.Errorf("generating jit config: %w", err)
-	}
-
-	if err := s.sem.Acquire(ctx); err != nil {
-		return fmt.Errorf("acquiring semaphore: %w", err)
 	}
 
 	runnerCtx, cancel := context.WithCancel(ctx)
