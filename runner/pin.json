@@ -1,0 +1,9 @@
+{
+  "version": "2.338.2",
+  "sha256": {
+    "linux-x64": "baebf204307bac6193480852732f0aba2ae97b6c5597c244f4d5558390147c40",
+    "linux-arm64": "670adb2f268fe21dcbb58b3db0e0aa9d5b3bddfe2c651481336e561ff86de945",
+    "osx-x64": "109fff505a34014a7e8d1acb850c33d404811102f572b8fb9788e2fff013cc49",
+    "osx-arm64": "25a065af409ffa317ab4d5a3b614dd15fc9c40f2172bc1b35a1b1258e919a388"
+  }
+}

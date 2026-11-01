@@ -20,21 +20,33 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
       -X github.com/aboldnewlook/github-scaleset-orchestrator/internal/buildinfo.Date=${BUILD_DATE}" \
     -o /out/gso .
 
-# Stage 2: Pre-bake the GitHub Actions runner binary
+# Stage 2: Pre-bake the pinned GitHub Actions runner (runner/pin.json) for the
+# target platform and verify its SHA-256.
 FROM ubuntu:24.04 AS runner-dl
+ARG TARGETARCH
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl jq ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Download and extract the latest Linux x64 runner binary
-# Use the tags API (small JSON, no control character issues) to get the latest version
+COPY runner/pin.json /tmp/pin.json
 RUN set -eux; \
-    VERSION=$(curl -fsSL https://api.github.com/repos/actions/runner/releases/latest | grep -m1 '"tag_name"' | sed 's/.*"v\([^"]*\)".*/\1/'); \
-    URL="https://github.com/actions/runner/releases/download/v${VERSION}/actions-runner-linux-x64-${VERSION}.tar.gz"; \
-    mkdir -p "/opt/runner-cache/gso/runner-${VERSION}"; \
-    curl -fsSL "$URL" | tar xz -C "/opt/runner-cache/gso/runner-${VERSION}"; \
-    echo "Runner ${VERSION} extracted successfully"
+    case "${TARGETARCH:-amd64}" in \
+      amd64) PLATFORM=linux-x64 ;; \
+      arm64) PLATFORM=linux-arm64 ;; \
+      *) echo "unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    VERSION=$(jq -r .version /tmp/pin.json); \
+    SHA=$(jq -r --arg p "$PLATFORM" '.sha256[$p]' /tmp/pin.json); \
+    curl -fsSL -o /tmp/runner.tar.gz \
+      "https://github.com/actions/runner/releases/download/v${VERSION}/actions-runner-${PLATFORM}-${VERSION}.tar.gz"; \
+    echo "${SHA}  /tmp/runner.tar.gz" | sha256sum -c -; \
+    DEST="/opt/runner-cache/gso/runner-${VERSION}"; \
+    mkdir -p "$DEST"; \
+    tar xzf /tmp/runner.tar.gz -C "$DEST"; \
+    rm /tmp/runner.tar.gz; \
+    printf '%s' "$SHA" > "$DEST/.sha256"; \
+    echo "Runner ${VERSION} (${PLATFORM}) verified and extracted"
 
 # Stage 3: Runtime image
 # Ubuntu is used because the GitHub Actions runner spawns job processes

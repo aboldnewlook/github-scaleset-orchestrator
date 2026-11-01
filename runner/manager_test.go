@@ -3,8 +3,6 @@ package runner
 import (
 	"bytes"
 	"context"
-	"encoding/json"
-	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -166,204 +164,38 @@ func TestVerifyCached_MissingChecksumFile(t *testing.T) {
 	}
 }
 
-func TestLatestRelease(t *testing.T) {
-	osName := runtime.GOOS
-	if osName == "darwin" {
-		osName = "osx"
+func TestPinnedReleaseMatchesHostPlatform(t *testing.T) {
+	mgr := &Manager{cacheDir: t.TempDir(), logger: testLogger(), httpClient: &http.Client{}}
+	rel, err := mgr.pinnedRelease()
+	if runtime.GOOS == "windows" {
+		if err == nil {
+			t.Fatal("pinnedRelease() succeeded on windows, which has no tar.gz runner")
+		}
+		return
 	}
-	arch := runtime.GOARCH
-	switch arch {
-	case "amd64":
-		arch = "x64"
-	}
-	suffix := fmt.Sprintf("%s-%s", osName, arch)
-
-	tarballName := fmt.Sprintf("actions-runner-%s-2.320.0.tar.gz", suffix)
-	checksumName := fmt.Sprintf("actions-runner-%s-2.320.0.tar.gz.sha256", suffix)
-
-	release := ghRelease{
-		TagName: "v2.320.0",
-		Assets: []struct {
-			Name               string `json:"name"`
-			BrowserDownloadURL string `json:"browser_download_url"`
-		}{
-			{Name: tarballName, BrowserDownloadURL: "TARBALL_URL"},
-			{Name: checksumName, BrowserDownloadURL: "CHECKSUM_URL"},
-			{Name: "actions-runner-win-x64-2.320.0.zip", BrowserDownloadURL: "OTHER_URL"},
-		},
-	}
-
-	// Mock the release endpoint
-	releaseServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(release)
-	}))
-	defer releaseServer.Close()
-
-	// Mock the checksum endpoint
-	checksumServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = fmt.Fprintf(w, "abcdef123456  %s\n", tarballName)
-	}))
-	defer checksumServer.Close()
-
-	// Update URLs to point to our test servers
-	release.Assets[0].BrowserDownloadURL = releaseServer.URL + "/tarball"
-	release.Assets[1].BrowserDownloadURL = checksumServer.URL + "/checksum"
-
-	// Re-create the release server with updated URLs
-	releaseServer.Close()
-	releaseServer = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(release)
-	}))
-	defer releaseServer.Close()
-
-	// We need to override the URL used by latestRelease. Since it's hardcoded,
-	// we test the parsing logic indirectly by mocking an HTTP server and
-	// calling the function with a modified transport.
-	origTransport := http.DefaultTransport
-	http.DefaultTransport = &urlRewriter{
-		inner: origTransport,
-		rewrites: map[string]string{
-			"https://api.github.com/repos/actions/runner/releases/latest": releaseServer.URL,
-			"CHECKSUM_URL": checksumServer.URL + "/checksum",
-		},
-		prefix: checksumServer.URL,
-	}
-	defer func() { http.DefaultTransport = origTransport }()
-
-	dir := t.TempDir()
-	mgr := &Manager{cacheDir: dir, logger: testLogger(), httpClient: &http.Client{}}
-
-	rel, err := mgr.latestRelease(context.Background())
 	if err != nil {
-		t.Fatalf("latestRelease() error: %v", err)
+		t.Fatal(err)
 	}
-
-	if rel.version != "2.320.0" {
-		t.Fatalf("version = %q, want %q", rel.version, "2.320.0")
-	}
-	if rel.url == "" {
-		t.Fatal("expected non-empty tarball URL")
+	pin, _ := PinnedRunner()
+	platform, _ := Platform(runtime.GOOS, runtime.GOARCH)
+	url, sum, _ := pin.Asset(platform)
+	if rel.version != pin.Version || rel.url != url || rel.checksum != sum {
+		t.Fatalf("pinnedRelease() = %+v, want version %s url %s checksum %s", rel, pin.Version, url, sum)
 	}
 }
 
-// urlRewriter is a test RoundTripper that redirects specific URLs to test servers.
-type urlRewriter struct {
-	inner    http.RoundTripper
-	rewrites map[string]string
-	prefix   string // prefix for checksum URL rewriting
-}
-
-func (u *urlRewriter) RoundTrip(req *http.Request) (*http.Response, error) {
-	url := req.URL.String()
-	if newURL, ok := u.rewrites[url]; ok {
-		newReq := req.Clone(req.Context())
-		parsed, _ := req.URL.Parse(newURL)
-		newReq.URL = parsed
-		return u.inner.RoundTrip(newReq)
-	}
-	return u.inner.RoundTrip(req)
-}
-
-func TestLatestRelease_NoMatchingAsset(t *testing.T) {
-	release := ghRelease{
-		TagName: "v2.320.0",
-		Assets: []struct {
-			Name               string `json:"name"`
-			BrowserDownloadURL string `json:"browser_download_url"`
-		}{
-			{Name: "actions-runner-win-x64-2.320.0.zip", BrowserDownloadURL: "http://example.com"},
-		},
-	}
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(release)
-	}))
+func TestDownloadRefusesReleaseWithoutPinnedChecksum(t *testing.T) {
+	requested := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { requested = true }))
 	defer server.Close()
-
-	origTransport := http.DefaultTransport
-	http.DefaultTransport = &urlRewriter{
-		inner: origTransport,
-		rewrites: map[string]string{
-			"https://api.github.com/repos/actions/runner/releases/latest": server.URL,
-		},
-	}
-	defer func() { http.DefaultTransport = origTransport }()
-
 	dir := t.TempDir()
 	mgr := &Manager{cacheDir: dir, logger: testLogger(), httpClient: &http.Client{}}
-
-	// On non-Windows with non-x64, there might not be a matching asset.
-	// This test verifies the error path when no matching tarball is found.
-	_, err := mgr.latestRelease(context.Background())
-
-	// We may or may not get an error depending on the current OS/arch matching "win-x64"
-	osName := runtime.GOOS
-	if osName == "darwin" {
-		osName = "osx"
+	err := mgr.download(context.Background(), &runnerRelease{version: "1.0.0", url: server.URL}, filepath.Join(dir, "runner"), filepath.Join(dir, "runner", ".sha256"))
+	if err == nil || !strings.Contains(err.Error(), "pinned checksum") {
+		t.Fatalf("download() error = %v, want pinned checksum error", err)
 	}
-	if osName == "windows" && runtime.GOARCH == "amd64" {
-		// The zip file won't match because it's .zip not .tar.gz
-		if err == nil {
-			t.Fatal("expected error when only .zip available")
-		}
-	} else {
-		if err == nil {
-			t.Fatal("expected error when no matching asset")
-		}
-	}
-	if err != nil && !strings.Contains(err.Error(), "no runner binary found") {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-func TestLatestRelease_BadJSON(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte("{bad json"))
-	}))
-	defer server.Close()
-
-	origTransport := http.DefaultTransport
-	http.DefaultTransport = &urlRewriter{
-		inner: origTransport,
-		rewrites: map[string]string{
-			"https://api.github.com/repos/actions/runner/releases/latest": server.URL,
-		},
-	}
-	defer func() { http.DefaultTransport = origTransport }()
-
-	dir := t.TempDir()
-	mgr := &Manager{cacheDir: dir, logger: testLogger(), httpClient: &http.Client{}}
-
-	_, err := mgr.latestRelease(context.Background())
-	if err == nil {
-		t.Fatal("expected error for bad JSON")
-	}
-}
-
-func TestLatestRelease_ServerError(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	defer server.Close()
-
-	origTransport := http.DefaultTransport
-	http.DefaultTransport = &urlRewriter{
-		inner: origTransport,
-		rewrites: map[string]string{
-			"https://api.github.com/repos/actions/runner/releases/latest": server.URL,
-		},
-	}
-	defer func() { http.DefaultTransport = origTransport }()
-
-	dir := t.TempDir()
-	mgr := &Manager{cacheDir: dir, logger: testLogger(), httpClient: &http.Client{}}
-
-	_, err := mgr.latestRelease(context.Background())
-	if err == nil {
-		t.Fatal("expected error for server error")
-	}
-	if !strings.Contains(err.Error(), "500") {
-		t.Fatalf("expected status code in error, got: %v", err)
+	if requested {
+		t.Fatal("download() fetched a runner it could not verify")
 	}
 }
 
@@ -448,68 +280,6 @@ func TestFormatBytes(t *testing.T) {
 	}
 }
 
-func TestFetchChecksum(t *testing.T) {
-	tests := []struct {
-		name     string
-		body     string
-		status   int
-		wantHash string
-		wantErr  bool
-	}{
-		{
-			name:     "hash only",
-			body:     "abcdef1234567890\n",
-			status:   http.StatusOK,
-			wantHash: "abcdef1234567890",
-		},
-		{
-			name:     "hash with filename",
-			body:     "abcdef1234567890  actions-runner-osx-arm64-2.320.0.tar.gz\n",
-			status:   http.StatusOK,
-			wantHash: "abcdef1234567890",
-		},
-		{
-			name:    "server error",
-			body:    "",
-			status:  http.StatusNotFound,
-			wantErr: true,
-		},
-		{
-			name:    "empty body",
-			body:    "",
-			status:  http.StatusOK,
-			wantErr: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.WriteHeader(tt.status)
-				_, _ = w.Write([]byte(tt.body))
-			}))
-			defer server.Close()
-
-			dir := t.TempDir()
-			mgr := &Manager{cacheDir: dir, logger: testLogger(), httpClient: &http.Client{}}
-
-			hash, err := mgr.fetchChecksum(context.Background(), server.URL)
-			if tt.wantErr {
-				if err == nil {
-					t.Fatal("expected error")
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if hash != tt.wantHash {
-				t.Fatalf("hash = %q, want %q", hash, tt.wantHash)
-			}
-		})
-	}
-}
-
 func TestDownload_ChecksumMismatch(t *testing.T) {
 	// Serve a tarball (just some bytes — we expect checksum mismatch before extraction)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -552,8 +322,9 @@ func TestDownload_ServerError(t *testing.T) {
 	mgr := &Manager{cacheDir: dir, logger: testLogger(), httpClient: &http.Client{}}
 
 	rel := &runnerRelease{
-		version: "1.0.0",
-		url:     server.URL,
+		version:  "1.0.0",
+		url:      server.URL,
+		checksum: strings.Repeat("0", 64),
 	}
 
 	err := mgr.download(context.Background(), rel, dest, checksumFile)

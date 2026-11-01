@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -19,8 +18,6 @@ import (
 const (
 	// maxDownloadSize is the maximum allowed size for runner binary downloads (500 MB).
 	maxDownloadSize = 500 * 1024 * 1024
-	// maxJSONResponseSize is the maximum allowed size for JSON API responses (10 MB).
-	maxJSONResponseSize = 10 * 1024 * 1024
 	// httpClientTimeout is the timeout for all HTTP requests made by the manager.
 	httpClientTimeout = 10 * time.Minute
 )
@@ -47,9 +44,9 @@ func NewManager(cacheDir string, logger *slog.Logger) (*Manager, error) {
 
 // RunnerDir returns the path to the cached runner binaries, downloading if needed.
 func (m *Manager) RunnerDir(ctx context.Context) (string, error) {
-	release, err := m.latestRelease(ctx)
+	release, err := m.pinnedRelease()
 	if err != nil {
-		return "", fmt.Errorf("fetching latest release: %w", err)
+		return "", fmt.Errorf("resolving pinned runner: %w", err)
 	}
 
 	// Check if we already have this version cached
@@ -92,6 +89,9 @@ func (m *Manager) verifyCached(dir, checksumFile, expectedChecksum string) bool 
 }
 
 func (m *Manager) download(ctx context.Context, release *runnerRelease, dest, checksumFile string) error {
+	if release.checksum == "" {
+		return fmt.Errorf("refusing to download runner %s without a pinned checksum", release.version)
+	}
 	m.logger.Info("fetching runner", "url", release.url)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, release.url, nil)
@@ -139,9 +139,9 @@ func (m *Manager) download(ctx context.Context, release *runnerRelease, dest, ch
 		return fmt.Errorf("closing temp file: %w", err)
 	}
 
-	// Verify checksum if available
+	// Verify against the pinned checksum.
 	actualChecksum := hex.EncodeToString(hasher.Sum(nil))
-	if release.checksum != "" && actualChecksum != release.checksum {
+	if actualChecksum != release.checksum {
 		return fmt.Errorf("checksum mismatch: expected %s, got %s", release.checksum, actualChecksum)
 	}
 
@@ -219,116 +219,19 @@ type runnerRelease struct {
 	checksum string
 }
 
-type ghRelease struct {
-	TagName string `json:"tag_name"`
-	Assets  []struct {
-		Name               string `json:"name"`
-		BrowserDownloadURL string `json:"browser_download_url"`
-	} `json:"assets"`
-}
-
-func (m *Manager) latestRelease(ctx context.Context) (*runnerRelease, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		"https://api.github.com/repos/actions/runner/releases/latest", nil)
+// pinnedRelease resolves the runner release fixed in pin.json for this host.
+func (m *Manager) pinnedRelease() (*runnerRelease, error) {
+	pin, err := PinnedRunner()
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Accept", "application/vnd.github+json")
-
-	resp, err := m.httpClient.Do(req)
+	platform, err := Platform(runtime.GOOS, runtime.GOARCH)
 	if err != nil {
-		return nil, fmt.Errorf("fetching latest runner release: %w", err)
+		return nil, err
 	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected status fetching runner release: %d", resp.StatusCode)
-	}
-
-	var release ghRelease
-	if err := json.NewDecoder(io.LimitReader(resp.Body, maxJSONResponseSize)).Decode(&release); err != nil {
-		return nil, fmt.Errorf("decoding release: %w", err)
-	}
-
-	osName := runtime.GOOS
-	if osName == "darwin" {
-		osName = "osx"
-	}
-
-	arch := runtime.GOARCH
-	switch arch {
-	case "amd64":
-		arch = "x64"
-	case "arm64":
-		// arm64 stays as-is
-	}
-
-	suffix := fmt.Sprintf("%s-%s", osName, arch)
-
-	var tarballURL, checksumURL string
-	for _, asset := range release.Assets {
-		if strings.Contains(asset.Name, suffix) {
-			if strings.HasSuffix(asset.Name, ".tar.gz") {
-				tarballURL = asset.BrowserDownloadURL
-			}
-			if strings.HasSuffix(asset.Name, ".tar.gz.sha256") {
-				checksumURL = asset.BrowserDownloadURL
-			}
-		}
-	}
-
-	if tarballURL == "" {
-		return nil, fmt.Errorf("no runner binary found for %s/%s", runtime.GOOS, runtime.GOARCH)
-	}
-
-	// Fetch checksum if available. Log a warning if it fails so the user
-	// knows verification was skipped; do not fail the download since the
-	// checksum URL may not exist for all versions.
-	var checksum string
-	if checksumURL != "" {
-		var err error
-		checksum, err = m.fetchChecksum(ctx, checksumURL)
-		if err != nil {
-			m.logger.Warn("failed to fetch runner checksum, verification will be skipped",
-				"url", checksumURL, "error", err)
-		}
-	}
-
-	version := strings.TrimPrefix(release.TagName, "v")
-
-	return &runnerRelease{
-		version:  version,
-		url:      tarballURL,
-		checksum: checksum,
-	}, nil
-}
-
-func (m *Manager) fetchChecksum(ctx context.Context, url string) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	url, sum, err := pin.Asset(platform)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-
-	resp, err := m.httpClient.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("unexpected status: %d", resp.StatusCode)
-	}
-
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxJSONResponseSize))
-	if err != nil {
-		return "", err
-	}
-
-	// Checksum files are typically "hash  filename" or just "hash"
-	parts := strings.Fields(strings.TrimSpace(string(data)))
-	if len(parts) > 0 {
-		return parts[0], nil
-	}
-
-	return "", fmt.Errorf("empty checksum file")
+	return &runnerRelease{version: pin.Version, url: url, checksum: sum}, nil
 }

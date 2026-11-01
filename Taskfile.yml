@@ -10,3 +10,8 @@ tasks:
     desc: Run tests via go-actions
     cmds:
       - go-actions check test
+
+  runner:bump:
+    desc: Pin the GitHub Actions runner (default latest; pass a version after --). Rewrites runner/pin.json.
+    cmds:
+      - scripts/bump-runner.sh {{.CLI_ARGS}}
