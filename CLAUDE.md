@@ -26,7 +26,7 @@ go run . -config config.yaml   # Run the orchestrator
 | `internal/config/` | YAML config loading and token resolution (env, keychain, file) |
 | `internal/orchestrator/` | Per-repo scale set listeners with shared concurrency semaphore |
 | `internal/scaler/` | `listener.Scaler` implementation -- spawns JIT ephemeral runners |
-| `internal/runner/` | Runner binary download/caching and subprocess management |
+| `runner/` | Public: runner binary download/caching, subprocess and Docker executors |
 | `internal/event/` | Fan-out event bus with JSONL file persistence |
 | `internal/service/` | Runtime service -- live state access via control socket |
 | `internal/control/` | Unix domain socket IPC protocol and platform socket paths |

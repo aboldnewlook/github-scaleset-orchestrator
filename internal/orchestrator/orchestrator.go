@@ -15,9 +15,9 @@ import (
 	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/config"
 	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/event"
 	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/naming"
-	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/runner"
 	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/scaler"
 	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/service"
+	"github.com/aboldnewlook/github-scaleset-orchestrator/runner"
 	"github.com/actions/scaleset"
 	"github.com/actions/scaleset/listener"
 )
