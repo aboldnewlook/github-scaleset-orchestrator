@@ -1,0 +1,231 @@
+// gso.worker.v1 is the protocol between a gso router and its workers
+// (design spec docs/design/remote-workers.md §4). Changes within v1 are
+// additive only; `buf breaking` enforces this in CI. A breaking change means
+// a new gso.worker.v2 package.
+syntax = "proto3";
+
+package gso.worker.v1;
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/aboldnewlook/github-scaleset-orchestrator/gen/gso/worker/v1;workerv1";
+
+// WorkerService is served by the router on workers.listen (TLS 1.3, the
+// worker pins the router key's SPKI). Enroll authenticates with a one-time
+// code; every other RPC sends "Authorization: Bearer <worker_id>.<secret>".
+service WorkerService {
+  // Enroll exchanges a single-use enrollment code for a worker credential.
+  // Rate-limited per source IP.
+  rpc Enroll(EnrollRequest) returns (EnrollResponse);
+  // OpenSession starts the worker's only live session. Rejected with
+  // FailedPrecondition while another session for the worker is live.
+  rpc OpenSession(OpenSessionRequest) returns (OpenSessionResponse);
+  // Subscribe streams directives (offers, cancels, drain, keepalives).
+  // buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
+  rpc Subscribe(SubscribeRequest) returns (stream Directive);
+  // Heartbeat is the only liveness signal.
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+  // AcceptOffer commits a slot; the JIT config is minted and returned here.
+  rpc AcceptOffer(AcceptOfferRequest) returns (AcceptOfferResponse);
+  // RejectOffer declines an offer, or reports a JIT config that failed the
+  // worker's verification after AcceptOffer.
+  rpc RejectOffer(RejectOfferRequest) returns (RejectOfferResponse);
+  // ReportRunner reports a runner's phase changes.
+  rpc ReportRunner(ReportRunnerRequest) returns (ReportRunnerResponse);
+  // CloseSession ends the session cleanly so the worker can reconnect at once.
+  rpc CloseSession(CloseSessionRequest) returns (CloseSessionResponse);
+}
+
+enum OS {
+  OS_UNSPECIFIED = 0;
+  OS_LINUX = 1;
+  OS_MACOS = 2;
+  OS_WINDOWS = 3;
+}
+
+enum Arch {
+  ARCH_UNSPECIFIED = 0;
+  ARCH_X64 = 1;
+  ARCH_ARM64 = 2;
+}
+
+// Class is the (OS, arch) pair a scale set serves.
+message Class {
+  OS os = 1;
+  Arch arch = 2;
+}
+
+enum ExecutorKind {
+  EXECUTOR_KIND_UNSPECIFIED = 0;
+  EXECUTOR_KIND_NATIVE = 1;
+  EXECUTOR_KIND_DOCKER = 2;
+}
+
+message Executor {
+  ExecutorKind kind = 1;
+  repeated Class classes = 2;
+  string detail = 3;
+}
+
+message Capabilities {
+  string worker_version = 1;
+  uint32 slots = 2;
+  repeated Executor executors = 3;
+}
+
+// Bounds are fixed by the admin at enrollment; the router clamps advertised
+// capabilities to them.
+message Bounds {
+  repeated Class classes = 1;
+  uint32 max_slots = 2;
+  // Empty means every repository the router serves.
+  repeated string repos = 3;
+}
+
+enum Availability {
+  AVAILABILITY_UNSPECIFIED = 0;
+  AVAILABILITY_AVAILABLE = 1;
+  AVAILABILITY_DRAINING = 2;
+  AVAILABILITY_UNAVAILABLE = 3;
+}
+
+enum RunnerPhase {
+  RUNNER_PHASE_UNSPECIFIED = 0;
+  RUNNER_PHASE_STARTING = 1;
+  RUNNER_PHASE_RUNNING = 2;
+  RUNNER_PHASE_EXITED = 3;
+}
+
+message RunnerState {
+  string runner_name = 1;
+  int64 runner_id = 2;
+  string repo = 3;
+  Class class = 4;
+  RunnerPhase phase = 5;
+}
+
+// PublicPolicy is the router-pushed default; the worker may override it locally.
+message PublicPolicy {
+  bool worker_default_accept = 1;
+}
+
+message EnrollRequest {
+  string enrollment_code = 1;
+  string worker_name = 2;
+  string machine_id = 3;
+}
+
+message EnrollResponse {
+  // "<worker_id>.<secret>"; returned exactly once.
+  string credential = 1;
+  Bounds bounds = 2;
+  // Seeds the worker-local allowlist, e.g. "jrschumacher/*".
+  repeated string owner_scopes = 3;
+}
+
+message OpenSessionRequest {
+  string machine_id = 1;
+  Capabilities capabilities = 2;
+  Availability availability = 3;
+  repeated RunnerState running = 4;
+  // The worker's effective local decision.
+  bool accept_public = 5;
+}
+
+message OpenSessionResponse {
+  string session_id = 1;
+  // Capabilities after the router's clamp to the enrolled bounds.
+  Capabilities effective = 2;
+  PublicPolicy policy = 3;
+  google.protobuf.Duration heartbeat_interval = 4;
+  google.protobuf.Duration offer_ttl = 5;
+  // Runners whose adoption failed; the worker kills them.
+  repeated string rejected_runners = 6;
+}
+
+message SubscribeRequest {
+  string session_id = 1;
+}
+
+message Directive {
+  oneof kind {
+    Offer offer = 1;
+    Cancel cancel = 2;
+    Drain drain = 3;
+    Keepalive keepalive = 4;
+  }
+}
+
+message Offer {
+  // 128-bit random, bound to the (session, worker) it was sent to.
+  string offer_id = 1;
+  string runner_name = 2;
+  string repo = 3;
+  Class class = 4;
+  ExecutorKind executor = 5;
+  bool public_repo = 6;
+  google.protobuf.Timestamp expires_at = 7;
+  // "none" or "repo": the docker job cache policy for this repository.
+  // Always "none" when public_repo is set.
+  string cache_mode = 8;
+}
+
+message Cancel {
+  string runner_name = 1;
+  string reason = 2;
+}
+
+message Drain {
+  string reason = 1;
+}
+
+message Keepalive {}
+
+message HeartbeatRequest {
+  string session_id = 1;
+  Availability availability = 2;
+  repeated RunnerState running = 3;
+  bool accept_public = 4;
+}
+
+message HeartbeatResponse {
+  PublicPolicy policy = 1;
+}
+
+message AcceptOfferRequest {
+  string session_id = 1;
+  string offer_id = 2;
+}
+
+message AcceptOfferResponse {
+  string runner_name = 1;
+  int64 runner_id = 2;
+  string encoded_jit_config = 3;
+}
+
+message RejectOfferRequest {
+  string session_id = 1;
+  string offer_id = 2;
+  string reason = 3;
+}
+
+message RejectOfferResponse {}
+
+message ReportRunnerRequest {
+  string session_id = 1;
+  string runner_name = 2;
+  RunnerPhase phase = 3;
+  int32 exit_code = 4;
+  string error = 5;
+  bool preempted = 6;
+}
+
+message ReportRunnerResponse {}
+
+message CloseSessionRequest {
+  string session_id = 1;
+  string reason = 2;
+}
+
+message CloseSessionResponse {}
