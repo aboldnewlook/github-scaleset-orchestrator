@@ -1,5 +1,8 @@
-# Stage 1: Build the Go binary
-FROM golang:1.27-alpine AS builder
+# Stage 1: Build the Go binary. This stage runs on the build host's platform
+# and cross-compiles for the target, so arm64 images need no emulated Go build.
+FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS builder
+ARG TARGETOS
+ARG TARGETARCH
 
 RUN apk add --no-cache git
 
@@ -13,7 +16,7 @@ ARG VERSION=dev
 ARG COMMIT=unknown
 ARG BUILD_DATE=unknown
 
-RUN CGO_ENABLED=0 GOOS=linux go build \
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} go build \
     -ldflags="-s -w \
       -X github.com/aboldnewlook/github-scaleset-orchestrator/internal/buildinfo.Version=${VERSION} \
       -X github.com/aboldnewlook/github-scaleset-orchestrator/internal/buildinfo.Commit=${COMMIT} \

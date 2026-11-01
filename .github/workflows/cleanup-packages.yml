@@ -1,8 +1,9 @@
 name: Cleanup packages
 
+# The weekly schedule is off: delete-package-versions removes the untagged
+# per-platform manifests that multi-arch tags point to, which breaks pulls of
+# older tags (and rollback). Re-enable only with a multi-arch-aware cleanup.
 on:
-  schedule:
-    - cron: "0 6 * * 0" # Weekly on Sunday at 6am UTC
   workflow_dispatch:
 
 permissions:
