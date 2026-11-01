@@ -38,7 +38,7 @@ func LoadOrGenerateTLSConfig(certPath, keyPath string, logger *slog.Logger) (*tl
 		}
 
 		fp := CertFingerprint(parsed)
-		return &tls.Config{Certificates: []tls.Certificate{cert}}, fp, nil
+		return &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS13}, fp, nil
 	}
 
 	if certExists != keyExists {
@@ -117,7 +117,7 @@ func LoadOrGenerateTLSConfig(certPath, keyPath string, logger *slog.Logger) (*tl
 		Leaf:        parsed,
 	}
 
-	return &tls.Config{Certificates: []tls.Certificate{tlsCert}}, fp, nil
+	return &tls.Config{Certificates: []tls.Certificate{tlsCert}, MinVersion: tls.VersionTLS13}, fp, nil
 }
 
 // CertFingerprint returns the SHA-256 fingerprint of a certificate in
@@ -230,6 +230,7 @@ func VerifyOrTrustFingerprint(knownHostsPath, host, fingerprint string) error {
 // (useful for automation / --trust-fingerprint flag).
 func TOFUTLSConfig(knownHostsPath, serverAddr, trustFingerprint string) *tls.Config {
 	return &tls.Config{
+		MinVersion:         tls.VersionTLS13,
 		InsecureSkipVerify: true, //nolint:gosec // TOFU: we verify the fingerprint ourselves
 		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
 			if len(rawCerts) == 0 {

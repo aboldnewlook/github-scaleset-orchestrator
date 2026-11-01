@@ -491,3 +491,57 @@ func TestGeneratedCertWorksWithTLSListener(t *testing.T) {
 	}
 	_ = ln.Close()
 }
+
+func TestControlTLSConfigsRequireTLS13(t *testing.T) {
+	dir := t.TempDir()
+	certPath, keyPath := filepath.Join(dir, "cert.pem"), filepath.Join(dir, "key.pem")
+	generated, _, err := LoadOrGenerateTLSConfig(certPath, keyPath, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, _, err := LoadOrGenerateTLSConfig(certPath, keyPath, nil) // files exist now: the load path
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := TOFUTLSConfig(filepath.Join(dir, "known_hosts"), "127.0.0.1:9100", "")
+	for name, cfg := range map[string]*tls.Config{"generated": generated, "loaded": loaded, "client": client} {
+		if cfg.MinVersion != tls.VersionTLS13 {
+			t.Errorf("%s MinVersion = %#x, want %#x (TLS 1.3)", name, cfg.MinVersion, tls.VersionTLS13)
+		}
+	}
+}
+
+func TestControlTLSServerRefusesTLS12Client(t *testing.T) {
+	dir := t.TempDir()
+	srvCfg, _, err := LoadOrGenerateTLSConfig(filepath.Join(dir, "cert.pem"), filepath.Join(dir, "key.pem"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", srvCfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() { _ = conn.(*tls.Conn).Handshake(); _ = conn.Close() }()
+		}
+	}()
+	old := &tls.Config{InsecureSkipVerify: true, MaxVersion: tls.VersionTLS12} //nolint:gosec // deliberately outdated client
+	if conn, err := tls.Dial("tcp", ln.Addr().String(), old); err == nil {
+		_ = conn.Close()
+		t.Fatal("a TLS 1.2 client completed the handshake")
+	}
+	conn, err := tls.Dial("tcp", ln.Addr().String(), TOFUTLSConfig(filepath.Join(dir, "known_hosts"), ln.Addr().String(), ""))
+	if err != nil {
+		t.Fatalf("TLS 1.3 client: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+	if v := conn.ConnectionState().Version; v != tls.VersionTLS13 {
+		t.Fatalf("negotiated %#x, want TLS 1.3", v)
+	}
+}
