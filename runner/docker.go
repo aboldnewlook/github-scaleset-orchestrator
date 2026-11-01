@@ -36,14 +36,51 @@ type DockerWorker struct {
 	endpoint   string
 }
 
-func NewDockerWorker(image, instanceID string, memoryMB int64, cpus float64, cacheRoot string, cacheUID, cacheGID int, logger *slog.Logger) *DockerWorker {
+// DockerConfig configures a DockerWorker.
+type DockerConfig struct {
+	Image      string  // job image; must contain /usr/local/bin/gso-job and /opt/gso-runner
+	InstanceID string  // stable ID that labels this manager's containers
+	MemoryMB   int64   // 0 = no limit
+	CPUs       float64 // 0 = no limit
+	CacheRoot  string  // optional host path for per-repo caches
+	CacheUID   int
+	CacheGID   int
+	Host       string // engine endpoint, e.g. unix:///var/run/docker.sock; "" = DefaultDockerHost
+}
+
+// DefaultDockerHost is the engine endpoint used when DockerConfig.Host is empty.
+const DefaultDockerHost = "unix:///var/run/docker.sock"
+
+// DockerSocketPath returns the socket path of a unix:// engine endpoint.
+// Only unix:///absolute/path is supported; Windows named pipes arrive with
+// the Windows worker.
+func DockerSocketPath(host string) (string, error) {
+	if host == "" {
+		host = DefaultDockerHost
+	}
+	u, err := url.Parse(host)
+	if err != nil {
+		return "", fmt.Errorf("parsing docker host %q: %w", host, err)
+	}
+	if u.Scheme != "unix" || u.Host != "" || u.Path == "" {
+		return "", fmt.Errorf("docker host %q: only unix:///absolute/path endpoints are supported", host)
+	}
+	return u.Path, nil
+}
+
+func NewDockerWorker(cfg DockerConfig, logger *slog.Logger) (*DockerWorker, error) {
+	socket, err := DockerSocketPath(cfg.Host)
+	if err != nil {
+		return nil, err
+	}
 	transport := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-		return (&net.Dialer{}).DialContext(ctx, "unix", "/var/run/docker.sock")
+		return (&net.Dialer{}).DialContext(ctx, "unix", socket)
 	}}
 	return &DockerWorker{
-		image: image, instanceID: instanceID, memoryMB: memoryMB, cpus: cpus, cacheRoot: cacheRoot, cacheUID: cacheUID, cacheGID: cacheGID, logger: logger,
+		image: cfg.Image, instanceID: cfg.InstanceID, memoryMB: cfg.MemoryMB, cpus: cfg.CPUs,
+		cacheRoot: cfg.CacheRoot, cacheUID: cfg.CacheUID, cacheGID: cfg.CacheGID, logger: logger,
 		client: &http.Client{Transport: transport}, endpoint: "http://docker/v1.43",
-	}
+	}, nil
 }
 
 // ForRepo binds a repository identity and its cache policy to an executor.

@@ -5,16 +5,24 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
 
 func dockerTestWorker(server *httptest.Server) *DockerWorker {
-	w := NewDockerWorker("example/job:sha", "test-instance", 3072, 1.5, "", 1001, 1001, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	w, err := NewDockerWorker(DockerConfig{Image: "example/job:sha", InstanceID: "test-instance", MemoryMB: 3072, CPUs: 1.5, CacheUID: 1001, CacheGID: 1001}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		panic(err)
+	}
 	w.client = server.Client()
 	w.endpoint = server.URL + "/v1.43"
 	return w.ForRepo("owner/repo", "repo")
@@ -135,7 +143,10 @@ func TestDockerWorkerCancellationRemovesContainer(t *testing.T) {
 }
 
 func TestDockerCachePolicies(t *testing.T) {
-	w := NewDockerWorker("job", "test-instance", 0, 0, "/mnt/cache/gso-job-cache", 1001, 1001, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	w, err := NewDockerWorker(DockerConfig{Image: "job", InstanceID: "test-instance", CacheRoot: "/mnt/cache/gso-job-cache", CacheUID: 1001, CacheGID: 1001}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
 	trusted := w.ForRepo("owner/trusted", "repo").createRequest("jit")
 	untrusted := w.ForRepo("owner/untrusted", "none").createRequest("jit")
 	if len(trusted.HostConfig.Mounts) != 1 || trusted.HostConfig.Mounts[0].Type != "bind" || trusted.HostConfig.Mounts[0].Source != "/mnt/cache/gso-job-cache/"+cacheVolume("owner/trusted") {
@@ -181,3 +192,69 @@ func TestDockerWorkerReconcileOnlyOwnInstance(t *testing.T) {
 }
 
 func stringMustMarshal(v any) string { data, _ := json.Marshal(v); return string(data) }
+
+func TestDockerSocketPath(t *testing.T) {
+	tests := []struct {
+		host    string
+		want    string
+		wantErr bool
+	}{
+		{"", "/var/run/docker.sock", false},
+		{"unix:///var/run/docker.sock", "/var/run/docker.sock", false},
+		{"unix:///Users/me/.docker/run/docker.sock", "/Users/me/.docker/run/docker.sock", false},
+		{"tcp://127.0.0.1:2375", "", true},
+		{"npipe:////./pipe/docker_engine", "", true},
+		{"unix://", "", true},
+		{"unix://docker.sock", "", true},
+		{"/var/run/docker.sock", "", true},
+	}
+	for _, tt := range tests {
+		got, err := DockerSocketPath(tt.host)
+		if (err != nil) != tt.wantErr || got != tt.want {
+			t.Errorf("DockerSocketPath(%q) = %q, %v; want %q, err=%v", tt.host, got, err, tt.want, tt.wantErr)
+		}
+	}
+}
+
+func TestDockerWorkerDialsConfiguredSocket(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix:// endpoints only")
+	}
+	dir, err := os.MkdirTemp("", "gsod") // short path: macOS caps unix socket paths at 104 bytes
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "d.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var hits atomic.Int32
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		if r.URL.Path != "/v1.43/containers/json" {
+			t.Errorf("path = %s", r.URL.Path)
+		}
+		_, _ = io.WriteString(w, "[]")
+	})}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { _ = srv.Close() })
+
+	w, err := NewDockerWorker(DockerConfig{Image: "img", InstanceID: "i", Host: "unix://" + sock}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := hits.Load(); got != 1 {
+		t.Fatalf("configured socket saw %d requests, want 1", got)
+	}
+}
+
+func TestNewDockerWorkerRejectsUnsupportedHost(t *testing.T) {
+	if _, err := NewDockerWorker(DockerConfig{Image: "img", InstanceID: "i", Host: "tcp://127.0.0.1:2375"}, slog.New(slog.NewTextHandler(io.Discard, nil))); err == nil {
+		t.Fatal("NewDockerWorker accepted a tcp:// host")
+	}
+}

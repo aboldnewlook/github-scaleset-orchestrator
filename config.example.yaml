@@ -17,6 +17,7 @@ max_runners: 4
 #   executor: docker
 #   image: ghcr.io/aboldnewlook/github-scaleset-orchestrator:0.6.0
 #   instance_id: unraid-main-gso  # unique, stable ID for crash cleanup
+#   docker_host: unix:///var/run/docker.sock  # engine socket (default shown); only unix:// is supported
 #   memory_mb: 3072
 #   cpus: 1.5
 #   cache: none                # none (default) or repo

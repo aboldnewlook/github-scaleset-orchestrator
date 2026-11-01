@@ -10,6 +10,8 @@ import (
 	"strings"
 
 	"github.com/spf13/viper"
+
+	"github.com/aboldnewlook/github-scaleset-orchestrator/runner"
 )
 
 // TokenSource defines how to resolve a GitHub PAT.
@@ -47,6 +49,7 @@ type RunnerConfig struct {
 	InstanceID string  `yaml:"instance_id" mapstructure:"instance_id"`
 	CacheUID   int     `yaml:"cache_uid" mapstructure:"cache_uid"`
 	CacheGID   int     `yaml:"cache_gid" mapstructure:"cache_gid"`
+	DockerHost string  `yaml:"docker_host" mapstructure:"docker_host"`
 }
 
 type Config struct {
@@ -109,6 +112,7 @@ func Load(path string) (*Config, error) {
 	_ = v.BindEnv("runner.instance_id", "GSO_RUNNER_INSTANCE_ID")
 	_ = v.BindEnv("runner.cache_uid", "GSO_RUNNER_CACHE_UID")
 	_ = v.BindEnv("runner.cache_gid", "GSO_RUNNER_CACHE_GID")
+	_ = v.BindEnv("runner.docker_host", "GSO_RUNNER_DOCKER_HOST")
 
 	// Parse GSO_REPOS before Viper unmarshal -- Viper can't map an env
 	// string into a slice-of-structs, so we handle it ourselves.
@@ -211,6 +215,11 @@ func (c *Config) validate() error {
 	}
 	if c.Runner.CacheUID < 0 || c.Runner.CacheGID < 0 {
 		return fmt.Errorf("runner cache UID and GID cannot be negative")
+	}
+	if c.Runner.DockerHost != "" {
+		if _, err := runner.DockerSocketPath(c.Runner.DockerHost); err != nil {
+			return fmt.Errorf("runner.docker_host: %w", err)
+		}
 	}
 
 	// Validate that at least global auth or every repo has a token source

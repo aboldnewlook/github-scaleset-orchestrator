@@ -146,7 +146,19 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 
 	var worker runner.Executor
 	if o.cfg.Runner.Executor == "docker" {
-		dockerWorker := runner.NewDockerWorker(o.cfg.Runner.Image, o.cfg.Runner.InstanceID, o.cfg.Runner.MemoryMB, o.cfg.Runner.CPUs, o.cfg.Runner.CacheRoot, o.cfg.Runner.CacheUID, o.cfg.Runner.CacheGID, o.logger)
+		dockerWorker, err := runner.NewDockerWorker(runner.DockerConfig{
+			Image:      o.cfg.Runner.Image,
+			InstanceID: o.cfg.Runner.InstanceID,
+			MemoryMB:   o.cfg.Runner.MemoryMB,
+			CPUs:       o.cfg.Runner.CPUs,
+			CacheRoot:  o.cfg.Runner.CacheRoot,
+			CacheUID:   o.cfg.Runner.CacheUID,
+			CacheGID:   o.cfg.Runner.CacheGID,
+			Host:       o.cfg.Runner.DockerHost,
+		}, o.logger)
+		if err != nil {
+			return fmt.Errorf("configuring docker executor: %w", err)
+		}
 		if err := dockerWorker.Reconcile(ctx); err != nil {
 			return fmt.Errorf("reconciling stale runner containers: %w", err)
 		}
