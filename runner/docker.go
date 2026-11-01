@@ -34,6 +34,7 @@ type DockerWorker struct {
 	logger     *slog.Logger
 	client     *http.Client
 	endpoint   string
+	onCancel   CancelPolicy
 }
 
 // DockerConfig configures a DockerWorker.
@@ -45,7 +46,8 @@ type DockerConfig struct {
 	CacheRoot  string  // optional host path for per-repo caches
 	CacheUID   int
 	CacheGID   int
-	Host       string // engine endpoint, e.g. unix:///var/run/docker.sock; "" = DefaultDockerHost
+	Host       string       // engine endpoint, e.g. unix:///var/run/docker.sock; "" = DefaultDockerHost
+	OnCancel   CancelPolicy // what Run does on ctx cancel; zero value KillOnCancel
 }
 
 // DefaultDockerHost is the engine endpoint used when DockerConfig.Host is empty.
@@ -78,7 +80,7 @@ func NewDockerWorker(cfg DockerConfig, logger *slog.Logger) (*DockerWorker, erro
 	}}
 	return &DockerWorker{
 		image: cfg.Image, instanceID: cfg.InstanceID, memoryMB: cfg.MemoryMB, cpus: cfg.CPUs,
-		cacheRoot: cfg.CacheRoot, cacheUID: cfg.CacheUID, cacheGID: cfg.CacheGID, logger: logger,
+		cacheRoot: cfg.CacheRoot, cacheUID: cfg.CacheUID, cacheGID: cfg.CacheGID, logger: logger, onCancel: cfg.OnCancel,
 		client: &http.Client{Transport: transport}, endpoint: "http://docker/v1.43",
 	}, nil
 }
@@ -191,7 +193,12 @@ func (w *DockerWorker) Run(ctx context.Context, name, jit string) error {
 	if created.ID == "" {
 		return errors.New("docker returned no container ID")
 	}
-	defer w.remove(created.ID)
+	removeOnReturn := true
+	defer func() {
+		if removeOnReturn {
+			w.remove(created.ID)
+		}
+	}()
 	w.logger.Info("runner container created", "name", name, "container", created.ID, "repo", w.repo)
 
 	containerPath := "/containers/" + url.PathEscape(created.ID)
@@ -206,6 +213,11 @@ func (w *DockerWorker) Run(ctx context.Context, name, jit string) error {
 	}
 	err := w.request(ctx, http.MethodPost, containerPath+"/wait?condition=not-running", nil, &result)
 	if ctx.Err() != nil {
+		if w.onCancel == DetachOnCancel {
+			removeOnReturn = false
+			w.logger.Info("runner container detached", "name", name, "container", created.ID)
+			return ctx.Err()
+		}
 		w.logger.Info("runner container cancelled", "name", name, "container", created.ID)
 		return ctx.Err()
 	}
@@ -265,7 +277,7 @@ func (w *DockerWorker) request(ctx context.Context, method, path string, body an
 		if failure.Message == "" {
 			failure.Message = resp.Status
 		}
-		return fmt.Errorf("docker API %s: %s", resp.Status, failure.Message)
+		return &dockerAPIError{status: resp.Status, code: resp.StatusCode, message: failure.Message}
 	}
 	if out != nil {
 		return json.NewDecoder(resp.Body).Decode(out)
@@ -309,3 +321,40 @@ func (w *DockerWorker) logs(ctx context.Context, id string) error {
 		}
 	}
 }
+
+// CancelPolicy decides what Run does with a still-running container when
+// its context is cancelled.
+type CancelPolicy int
+
+const (
+	// KillOnCancel force-removes the container (the zero value). gso uses it:
+	// shutdown, recycle and job completion all end the container.
+	KillOnCancel CancelPolicy = iota
+	// DetachOnCancel leaves the container running so a restarted worker can
+	// re-attach to it (design spec §7, "Worker process restart"). The caller
+	// owns the container and ends it with Kill.
+	DetachOnCancel
+)
+
+// Kill force-removes the runner container with the given name. A container
+// that no longer exists is not an error.
+func (w *DockerWorker) Kill(ctx context.Context, name string) error {
+	err := w.request(ctx, http.MethodDelete, "/containers/"+url.PathEscape(name)+"?force=true&v=true", nil, nil)
+	var apiErr *dockerAPIError
+	if errors.As(err, &apiErr) && apiErr.code == http.StatusNotFound {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("killing runner container %s: %w", name, err)
+	}
+	return nil
+}
+
+// dockerAPIError is a non-2xx Docker Engine response.
+type dockerAPIError struct {
+	status  string // e.g. "404 Not Found"
+	code    int
+	message string
+}
+
+func (e *dockerAPIError) Error() string { return fmt.Sprintf("docker API %s: %s", e.status, e.message) }

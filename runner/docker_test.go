@@ -258,3 +258,88 @@ func TestNewDockerWorkerRejectsUnsupportedHost(t *testing.T) {
 		t.Fatal("NewDockerWorker accepted a tcp:// host")
 	}
 }
+
+func dockerTestWorkerWith(server *httptest.Server, cfg DockerConfig) *DockerWorker {
+	w, err := NewDockerWorker(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		panic(err)
+	}
+	w.client = server.Client()
+	w.endpoint = server.URL + "/v1.43"
+	return w.ForRepo("owner/repo", "none")
+}
+
+func TestDockerWorkerDetachOnCancelLeavesContainerRunning(t *testing.T) {
+	waiting := make(chan struct{})
+	var deletes atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/v1.43/containers/create":
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, `{"Id":"keep-me"}`)
+		case r.URL.Path == "/v1.43/containers/keep-me/start":
+			w.WriteHeader(http.StatusNoContent)
+		case r.URL.Path == "/v1.43/containers/keep-me/wait":
+			close(waiting)
+			<-r.Context().Done()
+		case r.Method == http.MethodDelete:
+			deletes.Add(1)
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	w := dockerTestWorkerWith(server, DockerConfig{Image: "example/job:sha", InstanceID: "test-instance", OnCancel: DetachOnCancel})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- w.Run(ctx, "gso-detach", "jit") }()
+	select {
+	case <-waiting:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runner did not reach wait")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != context.Canceled {
+			t.Fatalf("Run error = %v, want context.Canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return after cancel")
+	}
+	// Run's deferred cleanup has finished by the time it returns.
+	if n := deletes.Load(); n != 0 {
+		t.Fatalf("detached container was deleted %d times, want 0", n)
+	}
+}
+
+func TestDockerWorkerKill(t *testing.T) {
+	tests := []struct {
+		name    string
+		status  int
+		body    string
+		wantErr bool
+	}{
+		{"removed", http.StatusNoContent, "", false},
+		{"already gone", http.StatusNotFound, `{"message":"No such container: gso-x"}`, false},
+		{"engine error", http.StatusInternalServerError, `{"message":"boom"}`, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodDelete || r.URL.Path != "/v1.43/containers/gso-x" || r.URL.Query().Get("force") != "true" {
+					t.Errorf("request = %s %s", r.Method, r.URL.String())
+				}
+				w.WriteHeader(tt.status)
+				_, _ = io.WriteString(w, tt.body)
+			}))
+			defer server.Close()
+			err := dockerTestWorker(server).Kill(context.Background(), "gso-x")
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("Kill() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
