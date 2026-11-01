@@ -48,6 +48,23 @@ repos:
     token:
       env: OTHER_OWNER_TOKEN
 
+# Simulated GitHub for local end-to-end runs: the router talks to this base URL
+# instead of github.com, and repos need no token source.
+# github_sim: http://127.0.0.1:8088
+
+# Remote workers (off unless workers.listen is set). Workers dial the router
+# over TLS 1.3, pin its key, and run jobs on their own machines; enroll one with
+# `gso workers add` on the router (unix socket only). With workers enabled,
+# max_runners may be 0: the router then runs no jobs and needs no Docker socket.
+# workers:
+#   listen: ":9200"                 # worker listener (Connect over TLS 1.3)
+#   advertise: "unraid.lan:9200"    # address written into join strings; required by `gso workers add`
+#   allow_cidrs:                    # default: private ranges only (RFC1918, 100.64/10, fc00::/7, loopback)
+#     - 192.168.1.0/24              # your LAN
+#     - 172.16.0.0/12               # the compose network, when the worker is a sibling container
+#   max_slots_per_worker: 16        # hard cap on any worker's advertised slots
+#   default_class: linux-x64        # default: the router host's class
+
 # Control server settings for remote TCP access.
 # TCP is always TLS-encrypted. Requires GSO_CONTROL_TOKEN env var.
 # control:

@@ -4,9 +4,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/viper"
@@ -52,6 +55,16 @@ type RunnerConfig struct {
 	DockerHost string  `yaml:"docker_host" mapstructure:"docker_host"`
 }
 
+// WorkersConfig enables remote workers (design spec §4.2, §9.1). Everything
+// here is off unless Listen is set.
+type WorkersConfig struct {
+	Listen            string   `yaml:"listen"               mapstructure:"listen"`
+	Advertise         string   `yaml:"advertise"            mapstructure:"advertise"`
+	AllowCIDRs        []string `yaml:"allow_cidrs"          mapstructure:"allow_cidrs"`
+	MaxSlotsPerWorker int      `yaml:"max_slots_per_worker" mapstructure:"max_slots_per_worker"`
+	DefaultClass      string   `yaml:"default_class"        mapstructure:"default_class"`
+}
+
 type Config struct {
 	Auth       TokenSource   `yaml:"auth"        mapstructure:"auth"`
 	MaxRunners int           `yaml:"max_runners" mapstructure:"max_runners"`
@@ -59,6 +72,10 @@ type Config struct {
 	Repos      []Repo        `yaml:"repos"       mapstructure:"repos"`
 	Control    ControlConfig `yaml:"control"     mapstructure:"control"`
 	Runner     RunnerConfig  `yaml:"runner"      mapstructure:"runner"`
+	Workers    WorkersConfig `yaml:"workers"     mapstructure:"workers"`
+	// GitHubSim is the base URL of a simulated GitHub. When set, repos need
+	// no token source: the simulator accepts none.
+	GitHubSim string `yaml:"github_sim" mapstructure:"github_sim"`
 }
 
 // Load reads configuration from the given file path, overlaid with environment
@@ -74,6 +91,7 @@ func Load(path string) (*Config, error) {
 	v.SetDefault("runner.cache", "none")
 	v.SetDefault("runner.cache_uid", 1001)
 	v.SetDefault("runner.cache_gid", 1001)
+	v.SetDefault("workers.max_slots_per_worker", 16)
 
 	// Config file
 	v.SetConfigType("yaml")
@@ -113,6 +131,11 @@ func Load(path string) (*Config, error) {
 	_ = v.BindEnv("runner.cache_uid", "GSO_RUNNER_CACHE_UID")
 	_ = v.BindEnv("runner.cache_gid", "GSO_RUNNER_CACHE_GID")
 	_ = v.BindEnv("runner.docker_host", "GSO_RUNNER_DOCKER_HOST")
+	_ = v.BindEnv("workers.listen", "GSO_WORKERS_LISTEN")
+	_ = v.BindEnv("workers.advertise", "GSO_WORKERS_ADVERTISE")
+	_ = v.BindEnv("workers.max_slots_per_worker", "GSO_WORKERS_MAX_SLOTS_PER_WORKER")
+	_ = v.BindEnv("workers.default_class", "GSO_WORKERS_DEFAULT_CLASS")
+	_ = v.BindEnv("github_sim", "GSO_GITHUB_SIM")
 
 	// Parse GSO_REPOS before Viper unmarshal -- Viper can't map an env
 	// string into a slice-of-structs, so we handle it ourselves.
@@ -153,6 +176,15 @@ func Load(path string) (*Config, error) {
 		cfg.Control.AllowCIDRs = cidrs
 	}
 
+	// Handle GSO_WORKERS_ALLOW_CIDRS as comma-separated when set via env
+	if cidrsEnv := os.Getenv("GSO_WORKERS_ALLOW_CIDRS"); cidrsEnv != "" {
+		cidrs := strings.Split(cidrsEnv, ",")
+		for i, c := range cidrs {
+			cidrs[i] = strings.TrimSpace(c)
+		}
+		cfg.Workers.AllowCIDRs = cidrs
+	}
+
 	// If no config file and no repos from env, report the missing file
 	if !fileExists && len(cfg.Repos) == 0 && path != "" {
 		return nil, fmt.Errorf("reading config: open %s: no such file or directory", path)
@@ -189,8 +221,19 @@ func (c *Config) validate() error {
 	if len(c.Repos) == 0 {
 		return fmt.Errorf("at least one repo is required")
 	}
-	if c.MaxRunners < 1 {
-		return fmt.Errorf("max_runners must be at least 1")
+	if c.MaxRunners < 0 {
+		return fmt.Errorf("max_runners cannot be negative")
+	}
+	// max_runners is the local member's slots (design spec §5.5). Zero means the
+	// router runs no jobs itself, which only makes sense with remote workers.
+	if c.MaxRunners == 0 && !c.WorkersEnabled() {
+		return fmt.Errorf("max_runners must be at least 1 (max_runners: 0 requires workers.listen)")
+	}
+	if err := c.Workers.validate(); err != nil {
+		return err
+	}
+	if err := validateGitHubSim(c.GitHubSim); err != nil {
+		return err
 	}
 	if c.Runner.Executor != "subprocess" && c.Runner.Executor != "docker" {
 		return fmt.Errorf("runner.executor must be subprocess or docker")
@@ -231,7 +274,7 @@ func (c *Config) validate() error {
 		if repo.RunnerCache != "" && repo.RunnerCache != "none" && repo.RunnerCache != "repo" {
 			return fmt.Errorf("repo %s runner_cache must be none or repo", repo.Name)
 		}
-		if !globalHasSource && !repo.Token.hasSource() {
+		if !c.Simulated() && !globalHasSource && !repo.Token.hasSource() {
 			return fmt.Errorf("repo %s has no token source and no global auth configured", repo.Name)
 		}
 	}
@@ -241,4 +284,82 @@ func (c *Config) validate() error {
 
 func (ts *TokenSource) hasSource() bool {
 	return ts.Env != "" || ts.Keychain != "" || ts.File != ""
+}
+
+// WorkersEnabled reports whether the router accepts remote workers.
+func (c *Config) WorkersEnabled() bool {
+	return c.Workers.Listen != ""
+}
+
+// DefaultClass is the class that carries the configured labels and that bare
+// `runs-on: self-hosted` lands on (design spec §6.1–6.2): workers.default_class,
+// or the router host's own class. validate has already parsed it.
+func (c *Config) DefaultClass() runner.Class {
+	if c.Workers.DefaultClass != "" {
+		if class, err := runner.ParseClass(c.Workers.DefaultClass); err == nil {
+			return class
+		}
+	}
+	return runner.HostClass()
+}
+
+// StateDir is where the router keeps state that must survive restarts
+// (worker TLS key, workers.json, classes.json; design spec §9.1). In the
+// container it is /home/runner/.config/gso and must be on a volume.
+func StateDir() (string, error) {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return "", fmt.Errorf("locating the user config directory: %w", err)
+	}
+	return filepath.Join(dir, "gso"), nil
+}
+
+func (w WorkersConfig) validate() error {
+	if w.Listen != "" {
+		if _, port, err := net.SplitHostPort(w.Listen); err != nil || !validPort(port) {
+			return fmt.Errorf("workers.listen must be [host]:port, got %q", w.Listen)
+		}
+	}
+	if w.Advertise != "" {
+		host, port, err := net.SplitHostPort(w.Advertise)
+		if err != nil || host == "" || !validPort(port) {
+			return fmt.Errorf("workers.advertise must be host:port, got %q", w.Advertise)
+		}
+	}
+	for _, cidr := range w.AllowCIDRs {
+		if _, _, err := net.ParseCIDR(cidr); err != nil {
+			return fmt.Errorf("workers.allow_cidrs: invalid CIDR %q", cidr)
+		}
+	}
+	if w.MaxSlotsPerWorker < 1 || w.MaxSlotsPerWorker > 256 {
+		return fmt.Errorf("workers.max_slots_per_worker must be between 1 and 256")
+	}
+	if w.DefaultClass != "" {
+		if _, err := runner.ParseClass(w.DefaultClass); err != nil {
+			return fmt.Errorf("workers.default_class: %w", err)
+		}
+	}
+	return nil
+}
+
+func validPort(port string) bool {
+	n, err := strconv.Atoi(port)
+	return err == nil && n >= 1 && n <= 65535
+}
+
+// Simulated reports whether the router talks to a simulated GitHub
+// (github_sim) instead of github.com.
+func (c *Config) Simulated() bool {
+	return c.GitHubSim != ""
+}
+
+func validateGitHubSim(raw string) error {
+	if raw == "" {
+		return nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return fmt.Errorf("github_sim must be an http(s) URL, got %q", raw)
+	}
+	return nil
 }
