@@ -2,6 +2,7 @@ package fleet
 
 import (
 	"context"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -9,6 +10,7 @@ import (
 	"connectrpc.com/connect"
 
 	workerv1 "github.com/aboldnewlook/github-scaleset-orchestrator/gen/gso/worker/v1"
+	"github.com/aboldnewlook/github-scaleset-orchestrator/gen/gso/worker/v1/workerv1connect"
 )
 
 // clockedFleet returns a ServerConfig mutator that swaps in a fleet driven by
@@ -123,22 +125,36 @@ func TestOversizedRequestsAreRefusedBeforeAuth(t *testing.T) {
 	}
 }
 
-func TestOpenSessionRefusesMoreRunningThanSlots(t *testing.T) {
-	e := newServerEnv(t)
+// A worker whose slots were lowered while runners still run must still be
+// able to reconnect: the session opens, GitHub is asked about at most the
+// bound, and every unexamined entry comes back in RejectedRunners.
+func TestOpenSessionWithMoreRunningThanSlotsStillOpens(t *testing.T) {
+	gh := newFakeGitHub()
+	gh.setScaleSet("o/r", linuxX64, 7)
+	e := newServerEnv(t, func(c *ServerConfig) {
+		tm := DefaultTiming()
+		c.Fleet = New(Options{Logger: c.Logger, Bus: c.Bus, Timing: tm, GitHub: gh, Adopter: &fakeAdopter{}})
+	})
 	cred, _ := e.enroll(t, "box", oneSlot(linuxX64)) // MaxSlots 1
 	var running []*workerv1.RunnerState
-	for i := 0; i < 2; i++ {
-		running = append(running, runningState("gso-box-r-abcde"+string(rune('a'+i)), "o/r", linuxX64, workerv1.RunnerPhase_RUNNER_PHASE_RUNNING))
+	var names []string
+	for i := 0; i < 20; i++ {
+		n := "gso-box-r-abcd" + string(rune('a'+i%26)) + string(rune('a'+i/26))
+		names = append(names, n)
+		running = append(running, runningState(n, "o/r", linuxX64, workerv1.RunnerPhase_RUNNER_PHASE_RUNNING))
 	}
-	_, err := e.client.OpenSession(context.Background(), authed(&workerv1.OpenSessionRequest{Capabilities: dockerCaps(1, linuxX64), Running: running}, cred))
-	if connect.CodeOf(err) != connect.CodeInvalidArgument {
-		t.Fatalf("2 running on a 1-slot worker = %v, want InvalidArgument", err)
+	resp, err := e.client.OpenSession(context.Background(), authed(&workerv1.OpenSessionRequest{Capabilities: dockerCaps(1, linuxX64), Running: running}, cred))
+	if err != nil {
+		t.Fatalf("20 running on a 1-slot worker = %v, want a session", err)
 	}
-	if strings.Contains(err.Error(), "gso-box-r") {
-		t.Fatalf("error echoes request data: %v", err)
+	if resp.Msg.GetSessionId() == "" {
+		t.Fatal("no session id")
 	}
-	if _, err := e.client.OpenSession(context.Background(), authed(&workerv1.OpenSessionRequest{Capabilities: dockerCaps(1, linuxX64), Running: running[:1]}, cred)); err != nil {
-		t.Fatalf("1 running on a 1-slot worker = %v", err)
+	if n := gh.getCalls(); n > 1 {
+		t.Fatalf("GetRunnerByName called %d times for a 1-slot worker, want at most 1", n)
+	}
+	if got := len(resp.Msg.GetRejectedRunners()); got != len(names) {
+		t.Fatalf("rejected %d of %d (none are known to GitHub)", got, len(names))
 	}
 }
 
@@ -194,6 +210,77 @@ func TestANewSubscribeSupersedesTheOldOne(t *testing.T) {
 	}
 	if offer == nil {
 		t.Fatalf("the current stream got no offer: %v", second.Err())
+	}
+	r.Release()
+	_ = waitErr(t, errc)
+}
+
+// A superseded handler stuck writing to a half-open connection (the client
+// never reads) must not delay the new stream beyond about one keepalive, and
+// must not take directives meant for the new stream.
+func TestSupersedingAStuckStreamIsBoundedByTheKeepalive(t *testing.T) {
+	e := newServerEnv(t)
+	cred, rec := e.enroll(t, "box", oneSlot(linuxX64))
+	sid := e.openSession(t, cred, dockerCaps(1, linuxX64)).GetSessionId()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	stuckCtx, stuckCancel := context.WithCancel(ctx)
+	defer stuckCancel()
+	// A client with tiny HTTP/2 receive windows that never reads: the
+	// server's writes block once the windows and socket buffers fill.
+	slowTransport := e.hc.Transport.(*http.Transport).Clone()
+	slowTransport.HTTP2 = &http.HTTP2Config{MaxReceiveBufferPerStream: 64 << 10, MaxReceiveBufferPerConnection: 64 << 10}
+	slowHC := &http.Client{Transport: slowTransport}
+	defer slowHC.CloseIdleConnections()
+	slowClient := workerv1connect.NewWorkerServiceClient(slowHC, e.url)
+	stuck, err := slowClient.Subscribe(stuckCtx, authed(&workerv1.SubscribeRequest{SessionId: sid}, cred))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = stuck.Close() }()
+	// Never read from stuck. Flood it with large directives until the
+	// handler's writes block on flow control and the channel backs up.
+	big := strings.Repeat("x", 1<<20)
+	queued := 0
+	for i := 0; i < directiveBuffer; i++ {
+		e.fleet.mu.Lock()
+		m := e.fleet.members[rec.ID]
+		ok := e.fleet.sendLocked(m, cancelDirective("gso-box-r-aaaaaa", big))
+		e.fleet.mu.Unlock()
+		if !ok {
+			break
+		}
+		queued++
+		time.Sleep(2 * time.Millisecond)
+	}
+	if queued < 20 {
+		t.Fatalf("only queued %d directives", queued)
+	}
+
+	start := time.Now()
+	second, err := e.client.Subscribe(ctx, authed(&workerv1.SubscribeRequest{SessionId: sid}, cred))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = second.Close() }()
+	if !second.Receive() {
+		t.Fatalf("new stream never went live: %v", second.Err())
+	}
+	t.Logf("queued=%d live after %v", queued, time.Since(start))
+	if d := time.Since(start); d > 3*time.Second {
+		t.Fatalf("new stream took %v to go live", d)
+	}
+	r, ok := e.fleet.Reserve(PlacementRequest{Repo: "o/r", Class: linuxX64})
+	if !ok {
+		t.Fatal("Reserve failed")
+	}
+	errc := runAsync(ctx, r, (&mintRecorder{}).mint)
+	var offer *workerv1.Offer
+	for offer == nil && second.Receive() {
+		offer = second.Msg().GetOffer()
+	}
+	if offer == nil {
+		t.Fatalf("the new stream got no offer: %v", second.Err())
 	}
 	r.Release()
 	_ = waitErr(t, errc)

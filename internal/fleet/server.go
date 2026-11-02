@@ -67,7 +67,6 @@ var (
 	errMsgOfferNotFound     = errors.New("offer not found")
 	errMsgNotPermitted      = errors.New("not permitted")
 	errMsgUnavailable       = errors.New("router unavailable")
-	errMsgTooManyRunners    = errors.New("too many running runners reported")
 )
 
 // NewServer builds the handler: Connect service behind the source allowlist.
@@ -181,13 +180,10 @@ func (s *Server) OpenSession(ctx context.Context, req *connect.Request[workerv1.
 	if err != nil {
 		return nil, err
 	}
-	limit := s.c.Fleet.o.MaxSlotsPerWorker
-	if b := rec.Bounds.MaxSlots; b > 0 && b < limit {
-		limit = b
-	}
-	if len(req.Msg.GetRunning()) > limit {
-		return nil, connect.NewError(connect.CodeInvalidArgument, errMsgTooManyRunners)
-	}
+	// A long running[] is not refused: a worker whose slots were lowered while
+	// runners still run must be able to reconnect. Fleet.OpenSession asks
+	// GitHub about at most the free slots' worth of plausible candidates and
+	// returns every other entry in RejectedRunners.
 	res, err := s.c.Fleet.OpenSession(ctx, rec, OpenSessionParams{
 		MachineID: req.Msg.GetMachineId(), Capabilities: req.Msg.GetCapabilities(), Availability: req.Msg.GetAvailability(),
 		Running: req.Msg.GetRunning(), AcceptPublic: req.Msg.GetAcceptPublic(),
@@ -241,8 +237,11 @@ func (s *Server) Subscribe(ctx context.Context, req *connect.Request[workerv1.Su
 	}()
 	if old != nil {
 		old.cancel()
+		wait := time.NewTimer(s.c.Fleet.o.Timing.Keepalive)
+		defer wait.Stop()
 		select {
 		case <-old.done:
+		case <-wait.C: // the old handler is stuck writing to a dead connection; it is cancelled and will not read again
 		case <-ctx.Done():
 			return nil
 		}
@@ -253,6 +252,12 @@ func (s *Server) Subscribe(ctx context.Context, req *connect.Request[workerv1.Su
 	ticker := time.NewTicker(s.c.Fleet.o.Timing.Keepalive)
 	defer ticker.Stop()
 	for {
+		// A superseded or finished handler must not take another directive:
+		// check before every receive (select alone picks among ready cases at
+		// random).
+		if ctx.Err() != nil {
+			return nil
+		}
 		select {
 		case <-ctx.Done():
 			return nil
