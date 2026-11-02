@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"connectrpc.com/connect"
@@ -36,7 +37,20 @@ type Server struct {
 	c       ServerConfig
 	limiter *enrollLimiter
 	handler http.Handler
+
+	subMu sync.Mutex
+	subs  map[string]*subscription // live Subscribe stream per session
 }
+
+// subscription is one live Subscribe stream; a newer stream for the same
+// session cancels it and waits for done before reading the directives.
+type subscription struct {
+	cancel context.CancelFunc
+	done   chan struct{}
+}
+
+// maxRequestBytes bounds every request body, decompressed, before auth.
+const maxRequestBytes = 1 << 20
 
 var _ workerv1connect.WorkerServiceHandler = (*Server)(nil)
 
@@ -53,6 +67,7 @@ var (
 	errMsgOfferNotFound     = errors.New("offer not found")
 	errMsgNotPermitted      = errors.New("not permitted")
 	errMsgUnavailable       = errors.New("router unavailable")
+	errMsgTooManyRunners    = errors.New("too many running runners reported")
 )
 
 // NewServer builds the handler: Connect service behind the source allowlist.
@@ -75,9 +90,9 @@ func NewServer(c ServerConfig) *Server {
 	if c.OwnerScopes == nil {
 		c.OwnerScopes = func(b Bounds) []string { return append([]string(nil), b.Repos...) }
 	}
-	s := &Server{c: c, limiter: newEnrollLimiter(c.EnrollPerMinute, c.EnrollPerHour, c.Now)}
+	s := &Server{c: c, subs: map[string]*subscription{}, limiter: newEnrollLimiter(c.EnrollPerMinute, c.EnrollPerHour, c.Now)}
 	mux := http.NewServeMux()
-	mux.Handle(workerv1connect.NewWorkerServiceHandler(s))
+	mux.Handle(workerv1connect.NewWorkerServiceHandler(s, connect.WithReadMaxBytes(maxRequestBytes)))
 	s.handler = allowCIDRs(mux, c.AllowNets)
 	return s
 }
@@ -166,6 +181,13 @@ func (s *Server) OpenSession(ctx context.Context, req *connect.Request[workerv1.
 	if err != nil {
 		return nil, err
 	}
+	limit := s.c.Fleet.o.MaxSlotsPerWorker
+	if b := rec.Bounds.MaxSlots; b > 0 && b < limit {
+		limit = b
+	}
+	if len(req.Msg.GetRunning()) > limit {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errMsgTooManyRunners)
+	}
 	res, err := s.c.Fleet.OpenSession(ctx, rec, OpenSessionParams{
 		MachineID: req.Msg.GetMachineId(), Capabilities: req.Msg.GetCapabilities(), Availability: req.Msg.GetAvailability(),
 		Running: req.Msg.GetRunning(), AcceptPublic: req.Msg.GetAcceptPublic(),
@@ -197,6 +219,33 @@ func (s *Server) Subscribe(ctx context.Context, req *connect.Request[workerv1.Su
 	ch, err := s.c.Fleet.Directives(req.Msg.GetSessionId(), rec.ID)
 	if err != nil {
 		return s.fleetError(err)
+	}
+	// One live stream per session: a newer Subscribe supersedes the older one
+	// (which ends cleanly) so a stale half-open stream cannot keep draining
+	// directives from the shared channel.
+	sid := req.Msg.GetSessionId()
+	ctx, cancel := context.WithCancel(ctx)
+	sub := &subscription{cancel: cancel, done: make(chan struct{})}
+	s.subMu.Lock()
+	old := s.subs[sid]
+	s.subs[sid] = sub
+	s.subMu.Unlock()
+	defer func() {
+		close(sub.done)
+		s.subMu.Lock()
+		if s.subs[sid] == sub {
+			delete(s.subs, sid)
+		}
+		s.subMu.Unlock()
+		cancel()
+	}()
+	if old != nil {
+		old.cancel()
+		select {
+		case <-old.done:
+		case <-ctx.Done():
+			return nil
+		}
 	}
 	if err := stream.Send(keepaliveDirective()); err != nil {
 		return err

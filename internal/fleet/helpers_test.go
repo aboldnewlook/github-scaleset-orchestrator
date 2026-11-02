@@ -44,6 +44,13 @@ type fakeGitHub struct {
 	runners   map[string]*RunnerRef // repo|name
 	scaleSets map[string]int        // repo|class
 	removed   []int64
+	gets      int
+}
+
+func (g *fakeGitHub) getCalls() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.gets
 }
 
 func newFakeGitHub() *fakeGitHub {
@@ -65,6 +72,7 @@ func (g *fakeGitHub) addRunner(repo, name string, id int64, scaleSetID int) {
 func (g *fakeGitHub) GetRunnerByName(_ context.Context, repo, name string) (*RunnerRef, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.gets++
 	return g.runners[repo+"|"+name], nil
 }
 
