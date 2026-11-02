@@ -1,0 +1,14 @@
+#!/bin/sh
+# ACTIONS_RUNNER_INPUT_JITCONFIG carries "sleep=<seconds>,exit=<code>" in the
+# integration test instead of a real JIT config.
+sleep_s=0
+exit_c=0
+IFS=,
+for kv in $ACTIONS_RUNNER_INPUT_JITCONFIG; do
+  case "$kv" in
+    sleep=*) sleep_s="${kv#sleep=}" ;;
+    exit=*) exit_c="${kv#exit=}" ;;
+  esac
+done
+sleep "$sleep_s"
+exit "$exit_c"

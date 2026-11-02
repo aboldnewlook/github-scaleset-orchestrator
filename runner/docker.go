@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -144,42 +145,104 @@ func (w *DockerWorker) createRequest(jit string) dockerCreateRequest {
 // Reconcile removes containers left by a previous manager process with the
 // same stable instance ID. A distinct ID is required for each manager.
 func (w *DockerWorker) Reconcile(ctx context.Context) error {
+	_, err := w.RemoveOrphans(ctx, nil)
+	return err
+}
+
+// RemoveOrphans force-removes this instance's runner containers whose name is
+// not in keep, and returns the names it removed (a container's ID when it has
+// no name). A worker passes the names of its runner records, so containers it
+// can still re-attach to survive a restart.
+func (w *DockerWorker) RemoveOrphans(ctx context.Context, keep map[string]bool) ([]string, error) {
 	filters, err := json.Marshal(map[string][]string{"label": {"gso.managed=true", "gso.instance=" + w.instanceID}})
 	if err != nil {
-		return err
+		return nil, err
 	}
 	var containers []struct {
-		ID string `json:"Id"`
+		ID    string   `json:"Id"`
+		Names []string `json:"Names"`
 	}
 	path := "/containers/json?all=1&filters=" + url.QueryEscape(string(filters))
 	if err := w.request(ctx, http.MethodGet, path, nil, &containers); err != nil {
-		return err
+		return nil, err
 	}
+	var removed []string
 	for _, container := range containers {
 		if container.ID == "" {
 			continue
 		}
-		w.logger.Warn("removing stale runner container", "container", container.ID, "instance", w.instanceID)
-		if err := w.request(ctx, http.MethodDelete, "/containers/"+url.PathEscape(container.ID)+"?force=true&v=true", nil, nil); err != nil {
-			return fmt.Errorf("removing stale runner container %s: %w", container.ID, err)
+		name := ""
+		if len(container.Names) > 0 {
+			name = strings.TrimPrefix(container.Names[0], "/")
 		}
+		if name != "" && keep[name] {
+			continue
+		}
+		w.logger.Warn("removing stale runner container", "container", container.ID, "name", name, "instance", w.instanceID)
+		err := w.request(ctx, http.MethodDelete, "/containers/"+url.PathEscape(container.ID)+"?force=true&v=true", nil, nil)
+		var apiErr *dockerAPIError
+		if errors.As(err, &apiErr) && apiErr.code == http.StatusNotFound {
+			continue // removed by someone else meanwhile
+		}
+		if err != nil {
+			return removed, fmt.Errorf("removing stale runner container %s: %w", container.ID, err)
+		}
+		if name == "" {
+			name = container.ID
+		}
+		removed = append(removed, name)
 	}
-	return nil
+	return removed, nil
 }
 
+// ErrContainerNotFound reports that a runner container no longer exists, for
+// example because it was removed while the worker was not running.
+var ErrContainerNotFound = errors.New("runner container not found")
+
+// Run starts a runner container and blocks until it exits. It is Start
+// followed by Wait, except that it follows the container by the ID Docker
+// returned. Cancelling ctx removes the container (KillOnCancel, gso's local
+// member) or leaves it running (DetachOnCancel).
 func (w *DockerWorker) Run(ctx context.Context, name, jit string) error {
+	id, err := w.start(ctx, name, jit)
+	if err != nil {
+		return err
+	}
+	return w.wait(ctx, id, name)
+}
+
+// Start creates the runner container (its Docker name is the runner name) and
+// starts it, then returns without waiting. Follow it with Wait; end it early
+// with Kill.
+func (w *DockerWorker) Start(ctx context.Context, name, jit string) error {
+	_, err := w.start(ctx, name, jit)
+	return err
+}
+
+// Wait follows the runner container with the given name until it stops, then
+// fetches its logs and removes it. A worker uses it both right after Start
+// and to re-attach after a restart. On ctx cancel, DetachOnCancel leaves the
+// container running and KillOnCancel removes it. Under DetachOnCancel a wait
+// failure that is not a cancel (the engine dropping the long-poll) also leaves
+// the container for the caller to re-attach to. A container that no longer
+// exists returns an error wrapping ErrContainerNotFound.
+func (w *DockerWorker) Wait(ctx context.Context, name string) error {
+	return w.wait(ctx, name, name)
+}
+
+func (w *DockerWorker) start(ctx context.Context, name, jit string) (string, error) {
 	if w.repo == "" {
-		return errors.New("docker worker has no repository")
+		return "", errors.New("docker worker has no repository")
 	}
 	if w.cache == "repo" && w.cacheRoot != "" {
 		cacheDir := filepath.Join(w.cacheRoot, cacheVolume(w.repo))
 		if err := os.MkdirAll(cacheDir, 0o770); err != nil {
-			return fmt.Errorf("creating repository cache: %w", err)
+			return "", fmt.Errorf("creating repository cache: %w", err)
 		}
 		// The image's non-root runner user needs write access to the host cache.
 		if os.Geteuid() == 0 {
 			if err := os.Chown(cacheDir, w.cacheUID, w.cacheGID); err != nil {
-				return fmt.Errorf("owning repository cache: %w", err)
+				return "", fmt.Errorf("owning repository cache: %w", err)
 			}
 		}
 	}
@@ -188,23 +251,28 @@ func (w *DockerWorker) Run(ctx context.Context, name, jit string) error {
 	}
 	path := "/containers/create?name=" + url.QueryEscape(name)
 	if err := w.request(ctx, http.MethodPost, path, w.createRequest(jit), &created); err != nil {
-		return fmt.Errorf("creating runner container: %w", err)
+		return "", fmt.Errorf("creating runner container: %w", err)
 	}
 	if created.ID == "" {
-		return errors.New("docker returned no container ID")
+		return "", errors.New("docker returned no container ID")
 	}
+	w.logger.Info("runner container created", "name", name, "container", created.ID, "repo", w.repo)
+	if err := w.request(ctx, http.MethodPost, "/containers/"+url.PathEscape(created.ID)+"/start", nil, nil); err != nil {
+		w.remove(created.ID)
+		return "", fmt.Errorf("starting runner container: %w", err)
+	}
+	return created.ID, nil
+}
+
+// wait follows the container ref (an ID or a name) until it stops.
+func (w *DockerWorker) wait(ctx context.Context, ref, name string) error {
 	removeOnReturn := true
 	defer func() {
 		if removeOnReturn {
-			w.remove(created.ID)
+			w.remove(ref)
 		}
 	}()
-	w.logger.Info("runner container created", "name", name, "container", created.ID, "repo", w.repo)
-
-	containerPath := "/containers/" + url.PathEscape(created.ID)
-	if err := w.request(ctx, http.MethodPost, containerPath+"/start", nil, nil); err != nil {
-		return fmt.Errorf("starting runner container: %w", err)
-	}
+	containerPath := "/containers/" + url.PathEscape(ref)
 	var result struct {
 		StatusCode int64 `json:"StatusCode"`
 		Error      *struct {
@@ -215,15 +283,26 @@ func (w *DockerWorker) Run(ctx context.Context, name, jit string) error {
 	if ctx.Err() != nil {
 		if w.onCancel == DetachOnCancel {
 			removeOnReturn = false
-			w.logger.Info("runner container detached", "name", name, "container", created.ID)
+			w.logger.Info("runner container detached", "name", name, "container", ref)
 			return ctx.Err()
 		}
-		w.logger.Info("runner container cancelled", "name", name, "container", created.ID)
+		w.logger.Info("runner container cancelled", "name", name, "container", ref)
 		return ctx.Err()
+	}
+	var apiErr *dockerAPIError
+	if errors.As(err, &apiErr) && apiErr.code == http.StatusNotFound {
+		removeOnReturn = false
+		return fmt.Errorf("waiting for runner container %s: %w", name, ErrContainerNotFound)
+	}
+	if err != nil && w.onCancel == DetachOnCancel {
+		// The wait itself failed while the container may still be running
+		// (dockerd dropped the long-poll). Leave it for the caller to re-attach.
+		removeOnReturn = false
+		return fmt.Errorf("waiting for runner container: %w", err)
 	}
 	// Fetch logs with an independent context, including after cancellation.
 	logCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	if logErr := w.logs(logCtx, created.ID); logErr != nil {
+	if logErr := w.logs(logCtx, ref); logErr != nil {
 		w.logger.Warn("runner container logs unavailable", "name", name, "error", logErr)
 	}
 	cancel()
@@ -236,8 +315,28 @@ func (w *DockerWorker) Run(ctx context.Context, name, jit string) error {
 	if result.StatusCode != 0 {
 		return fmt.Errorf("runner container exited with status %d", result.StatusCode)
 	}
-	w.logger.Info("runner container completed", "name", name, "container", created.ID)
+	w.logger.Info("runner container completed", "name", name, "container", ref)
 	return nil
+}
+
+// EngineArch returns the Docker engine's architecture ("amd64", "arm64"). A
+// worker maps it to the linux class it can serve.
+func (w *DockerWorker) EngineArch(ctx context.Context) (string, error) {
+	var version struct {
+		Arch string `json:"Arch"`
+	}
+	if err := w.request(ctx, http.MethodGet, "/version", nil, &version); err != nil {
+		return "", fmt.Errorf("reading docker engine version: %w", err)
+	}
+	if version.Arch == "" {
+		return "", errors.New("docker engine reported no architecture")
+	}
+	return version.Arch, nil
+}
+
+// Repo returns the repository bound by ForRepo, or "" for an unbound worker.
+func (w *DockerWorker) Repo() string {
+	return w.repo
 }
 
 func (w *DockerWorker) remove(id string) {
