@@ -38,6 +38,7 @@ func (m *Model) InjectJob(spec JobSpec) (JobState, error) {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	spec.Repo = m.canonLocked(spec.Repo)
 	if spec.Public {
 		m.repoLocked(spec.Repo).public = true
 	}
@@ -213,7 +214,7 @@ func (m *Model) CancelRun(repo string, runID int64) error {
 	now := m.now()
 	found := false
 	for _, j := range m.jobs {
-		if j.RunID != runID || j.Spec.Repo != repo {
+		if j.RunID != runID || !sameRepo(j.Spec.Repo, repo) {
 			continue
 		}
 		found = true
@@ -249,9 +250,9 @@ func (m *Model) repoInfo(repo string) ghapi.RepoInfo {
 		return *r.info
 	}
 	if r.public {
-		return ghapi.RepoInfo{FullName: repo, Private: false, Visibility: "public"}
+		return ghapi.RepoInfo{FullName: r.name, Private: false, Visibility: "public"}
 	}
-	return ghapi.RepoInfo{FullName: repo, Private: true, Visibility: "private"}
+	return ghapi.RepoInfo{FullName: r.name, Private: true, Visibility: "private"}
 }
 
 func (m *Model) workflowRun(repo string, runID int64) (ghapi.WorkflowRun, error) {
@@ -263,13 +264,13 @@ func (m *Model) workflowRun(repo string, runID int64) (ghapi.WorkflowRun, error)
 		return ghapi.WorkflowRun{}, fmt.Errorf("ghsim: simulated failure looking up run %d", runID)
 	}
 	for _, j := range m.jobs {
-		if j.RunID == runID && j.Spec.Repo == repo {
-			head := repo
+		if j.RunID == runID && sameRepo(j.Spec.Repo, repo) {
+			head := r.name
 			if j.Spec.Fork {
-				owner, name := splitRepo(repo)
+				owner, name := splitRepo(r.name)
 				head = "fork-" + owner + "/" + name
 			}
-			return ghapi.WorkflowRun{ID: runID, Event: j.Spec.Event, RepoFullName: repo, HeadRepoFullName: head}, nil
+			return ghapi.WorkflowRun{ID: runID, Event: j.Spec.Event, RepoFullName: r.name, HeadRepoFullName: head}, nil
 		}
 	}
 	return ghapi.WorkflowRun{}, fmt.Errorf("ghsim: run %d in %s: %w", runID, repo, scaleset.NotFoundError)

@@ -268,3 +268,64 @@ func TestInjectJobValidatesRepo(t *testing.T) {
 		t.Fatalf("error = %v, want BadRequestError", err)
 	}
 }
+
+func TestRepoIdentityIsCaseInsensitive(t *testing.T) {
+	m, _ := newTestModel(t)
+	ctx := context.Background()
+	c, ss, s := openSet(t, m, "Acme/Foo", "set", defaultLabels)
+
+	// scale set lookup from another spelling of the repository
+	if got, err := m.Client("acme/FOO").GetRunnerScaleSet(ctx, 1, "set"); err != nil || got == nil || got.ID != ss.ID {
+		t.Fatalf("scale set lookup = %+v, %v; want the set created as Acme/Foo", got, err)
+	}
+	if got := m.ScaleSets("ACME/foo"); len(got) != 1 {
+		t.Fatalf("ScaleSets = %v, want 1", got)
+	}
+
+	// job assignment from another spelling
+	job, err := m.InjectJob(JobSpec{Repo: "acme/foo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg := poll(t, s, 1)
+	if msg == nil || len(msg.JobAssignedMessages) != 1 || msg.JobAssignedMessages[0].RunnerRequestID != job.ID {
+		t.Fatalf("poll = %+v, want the job injected as acme/foo assigned", msg)
+	}
+
+	// runner lookup, JIT URL, claim and removal from other spellings
+	sj := mintRunner(t, c, ss.ID, "gso-x-foo-case01")
+	if sj.GitHubURL != "https://github.com/Acme/Foo" {
+		t.Fatalf("JIT gitHubUrl = %q, want the first-seen spelling", sj.GitHubURL)
+	}
+	if ref, _ := m.Client("ACME/FOO").GetRunnerByName(ctx, sj.RunnerName); ref == nil {
+		t.Fatal("runner not found through another spelling of its repo")
+	}
+	if got := m.Runners("acme/foo"); len(got) != 1 {
+		t.Fatalf("Runners = %v, want 1", got)
+	}
+	if m.MintCount("ACME/FOO") != 1 {
+		t.Fatalf("MintCount = %d, want 1", m.MintCount("ACME/FOO"))
+	}
+	if _, err := m.ClaimJob(ctx, sj.RunnerName, sj.Token); err != nil {
+		t.Fatal(err)
+	}
+
+	// Repo() and workflow runs
+	info, err := m.Client("acme/foo").Repo(ctx)
+	if err != nil || info.FullName != "Acme/Foo" {
+		t.Fatalf("Repo = %+v, %v; want FullName Acme/Foo", info, err)
+	}
+	if run, err := m.Client("ACME/FOO").WorkflowRun(ctx, job.RunID); err != nil || run.RepoFullName != "Acme/Foo" {
+		t.Fatalf("WorkflowRun = %+v, %v", run, err)
+	}
+	m.SetRepo("acme/FOO", ghapi.RepoInfo{FullName: "Acme/Foo", Private: false, Visibility: "public"})
+	if info, _ := c.Repo(ctx); info.Private {
+		t.Fatal("SetRepo through another spelling did not apply")
+	}
+	if err := m.Client("acme/foo").CancelWorkflowRun(ctx, job.RunID); err != nil {
+		t.Fatalf("CancelWorkflowRun: %v", err)
+	}
+	if got := m.Cancelled("Acme/Foo"); len(got) != 1 {
+		t.Fatalf("Cancelled = %v", got)
+	}
+}

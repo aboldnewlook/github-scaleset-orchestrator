@@ -15,21 +15,21 @@ func (m *Model) mint(repo string, setting *scaleset.RunnerScaleSetJitRunnerSetti
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	ss, ok := m.scaleSets[scaleSetID]
-	if !ok || ss.repo != repo {
+	if !ok || !sameRepo(ss.repo, repo) {
 		return nil, fmt.Errorf("ghsim: scale set %d: %w", scaleSetID, scaleset.NotFoundError)
 	}
 	if prev := m.runners[setting.Name]; prev != nil && !prev.removed && !prev.finished {
 		return nil, fmt.Errorf("ghsim: runner %q: %w", setting.Name, scaleset.RunnerExistsError)
 	}
 	m.nextRunnerID++
-	r := &runnerState{id: m.nextRunnerID, name: setting.Name, token: randomHex(16), repo: repo, scaleSetID: scaleSetID}
+	r := &runnerState{id: m.nextRunnerID, name: setting.Name, token: randomHex(16), repo: ss.repo, scaleSetID: scaleSetID}
 	m.runners[r.name] = r
 	m.allRunners = append(m.allRunners, r)
 	m.repoLocked(repo).mints++
 	m.notifyLocked()
 	return &scaleset.RunnerScaleSetJitRunnerConfig{
 		Runner:           &scaleset.RunnerReference{ID: int(r.id), Name: r.name, RunnerScaleSetID: scaleSetID},
-		EncodedJITConfig: EncodeJIT("https://github.com/"+repo, m.opts.ServerURL, r.name, r.token),
+		EncodedJITConfig: EncodeJIT("https://github.com/"+ss.repo, m.opts.ServerURL, r.name, r.token),
 	}, nil
 }
 
@@ -38,7 +38,7 @@ func (m *Model) runnerByName(repo, name string) *scaleset.RunnerReference {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	r := m.runners[name]
-	if r == nil || r.repo != repo || r.removed || r.finished {
+	if r == nil || !sameRepo(r.repo, repo) || r.removed || r.finished {
 		return nil
 	}
 	return &scaleset.RunnerReference{ID: int(r.id), Name: r.name, RunnerScaleSetID: r.scaleSetID}
@@ -48,7 +48,7 @@ func (m *Model) removeRunner(repo string, runnerID int64) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, r := range m.allRunners {
-		if r.id != runnerID || r.repo != repo || r.removed || r.finished {
+		if r.id != runnerID || !sameRepo(r.repo, repo) || r.removed || r.finished {
 			continue
 		}
 		if r.jobID != 0 {

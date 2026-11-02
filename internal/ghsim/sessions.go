@@ -35,7 +35,7 @@ func (m *Model) publicSetLocked(ss *scaleSetState) scaleset.RunnerScaleSet {
 func (m *Model) sortedScaleSetsLocked(repo string) []*scaleSetState {
 	var out []*scaleSetState
 	for _, ss := range m.scaleSets {
-		if ss.repo == repo {
+		if sameRepo(ss.repo, repo) {
 			out = append(out, ss)
 		}
 	}
@@ -46,7 +46,7 @@ func (m *Model) sortedScaleSetsLocked(repo string) []*scaleSetState {
 func (m *Model) listScaleSetsLocked(repo string) []scaleset.RunnerScaleSet {
 	var out []scaleset.RunnerScaleSet
 	for _, ss := range m.scaleSets {
-		if ss.repo == repo {
+		if sameRepo(ss.repo, repo) {
 			out = append(out, m.publicSetLocked(ss))
 		}
 	}
@@ -78,7 +78,7 @@ func (m *Model) createScaleSet(repo string, in *scaleset.RunnerScaleSet) (*scale
 	ss := m.pending[key]
 	delete(m.pending, key)
 	if ss == nil {
-		ss = &scaleSetState{repo: repo}
+		ss = &scaleSetState{repo: m.canonLocked(repo)}
 	}
 	m.nextScaleSetID++
 	ss.set = *in
@@ -97,7 +97,7 @@ func (m *Model) updateScaleSet(repo string, id int, in *scaleset.RunnerScaleSet)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	ss, ok := m.scaleSets[id]
-	if !ok || ss.repo != repo {
+	if !ok || !sameRepo(ss.repo, repo) {
 		return nil, fmt.Errorf("ghsim: scale set %d: %w", id, scaleset.NotFoundError)
 	}
 	if in != nil {
@@ -134,7 +134,7 @@ func (m *Model) openSession(repo string, scaleSetID int, owner string) (scaleset
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	ss, ok := m.scaleSets[scaleSetID]
-	if !ok || ss.repo != repo {
+	if !ok || !sameRepo(ss.repo, repo) {
 		return scaleset.RunnerScaleSetSession{}, fmt.Errorf("ghsim: scale set %d: %w", scaleSetID, scaleset.NotFoundError)
 	}
 	if ss.failN > 0 {
@@ -160,7 +160,7 @@ func (m *Model) openSession(repo string, scaleSetID int, owner string) (scaleset
 func (m *Model) sessionLocked(repo string, sid uuid.UUID) (*scaleSetState, *sessionState, error) {
 	id, ok := m.sessions[sid]
 	ss := m.scaleSets[id]
-	if !ok || ss == nil || ss.repo != repo || ss.session == nil || ss.session.id != sid || m.liveSessionLocked(ss) == nil {
+	if !ok || ss == nil || !sameRepo(ss.repo, repo) || ss.session == nil || ss.session.id != sid || m.liveSessionLocked(ss) == nil {
 		return nil, nil, fmt.Errorf("ghsim: session %s is not open: %w", sid, scaleset.MessageQueueTokenExpiredError)
 	}
 	return ss, ss.session, nil
@@ -229,7 +229,7 @@ func (m *Model) closeSession(repo string, sid uuid.UUID) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if id, ok := m.sessions[sid]; ok {
-		if ss := m.scaleSets[id]; ss != nil && ss.repo == repo && ss.session != nil && ss.session.id == sid {
+		if ss := m.scaleSets[id]; ss != nil && sameRepo(ss.repo, repo) && ss.session != nil && ss.session.id == sid {
 			ss.session.closed = true
 		}
 		delete(m.sessions, sid)

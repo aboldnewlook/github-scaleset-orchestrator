@@ -138,6 +138,7 @@ type Model struct {
 }
 
 type repoState struct {
+	name      string // first-seen spelling
 	public    bool
 	info      *ghapi.RepoInfo
 	mints     int
@@ -210,16 +211,36 @@ func (m *Model) notifyLocked() {
 	m.changed = make(chan struct{})
 }
 
+// repoKey folds a repository name for identity: GitHub treats owner/name
+// case-insensitively. Only ASCII is folded, as elsewhere in gso.
+func repoKey(repo string) string {
+	b := []byte(repo)
+	for i, c := range b {
+		if 'A' <= c && c <= 'Z' {
+			b[i] = c + 'a' - 'A'
+		}
+	}
+	return string(b)
+}
+
+func sameRepo(a, b string) bool { return repoKey(a) == repoKey(b) }
+
+// repoLocked returns the repository's state, creating it with name as its
+// canonical (first-seen) spelling.
 func (m *Model) repoLocked(name string) *repoState {
-	r := m.repos[name]
+	key := repoKey(name)
+	r := m.repos[key]
 	if r == nil {
-		r = &repoState{}
-		m.repos[name] = r
+		r = &repoState{name: name}
+		m.repos[key] = r
 	}
 	return r
 }
 
-func setKey(repo, name string) string { return repo + "\x00" + name }
+// canonLocked returns the first-seen spelling of repo.
+func (m *Model) canonLocked(repo string) string { return m.repoLocked(repo).name }
+
+func setKey(repo, name string) string { return repoKey(repo) + "\x00" + name }
 
 func splitRepo(repo string) (owner, name string) {
 	owner, name, _ = strings.Cut(repo, "/")
@@ -241,7 +262,7 @@ func randomHex(n int) string {
 
 func (m *Model) scaleSetByNameLocked(repo, name string) *scaleSetState {
 	for _, ss := range m.scaleSets {
-		if ss.repo == repo && ss.set.Name == name {
+		if sameRepo(ss.repo, repo) && ss.set.Name == name {
 			return ss
 		}
 	}
@@ -257,7 +278,7 @@ func (m *Model) controlTargetLocked(repo, name string) *scaleSetState {
 	key := setKey(repo, name)
 	p := m.pending[key]
 	if p == nil {
-		p = &scaleSetState{repo: repo, set: scaleset.RunnerScaleSet{Name: name}}
+		p = &scaleSetState{repo: m.canonLocked(repo), set: scaleset.RunnerScaleSet{Name: name}}
 		m.pending[key] = p
 	}
 	return p
@@ -308,7 +329,7 @@ func (m *Model) Runners(repo string) []scaleset.RunnerReference {
 	defer m.mu.Unlock()
 	var out []scaleset.RunnerReference
 	for _, r := range m.allRunners {
-		if r.repo == repo && !r.removed && !r.finished {
+		if sameRepo(r.repo, repo) && !r.removed && !r.finished {
 			out = append(out, scaleset.RunnerReference{ID: int(r.id), Name: r.name, RunnerScaleSetID: r.scaleSetID})
 		}
 	}
@@ -352,7 +373,7 @@ func (m *Model) DeleteScaleSet(repo string, id int) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	ss, ok := m.scaleSets[id]
-	if !ok || ss.repo != repo {
+	if !ok || !sameRepo(ss.repo, repo) {
 		return fmt.Errorf("ghsim: scale set %d: %w", id, scaleset.NotFoundError)
 	}
 	if ss.session != nil {
