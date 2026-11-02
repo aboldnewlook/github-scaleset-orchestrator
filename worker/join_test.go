@@ -68,3 +68,19 @@ func TestShortPin(t *testing.T) {
 		t.Fatalf("ShortPin(short) = %q", got)
 	}
 }
+
+func TestParseJoinErrorsNeverEchoAddress(t *testing.T) {
+	// A mangled string can put the code where the address belongs.
+	for _, in := range []string{
+		"gso-join:v1:" + testCode + ":" + testPin + ":" + testCode,
+		"gso-join:v1:" + testCode + ":99999:" + testPin + ":" + testCode,
+	} {
+		_, err := ParseJoin(in)
+		if err == nil {
+			t.Fatalf("ParseJoin(%q) succeeded", in)
+		}
+		if strings.Contains(err.Error(), testCode) {
+			t.Fatalf("error leaks the code: %v", err)
+		}
+	}
+}

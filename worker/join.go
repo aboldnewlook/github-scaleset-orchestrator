@@ -55,10 +55,10 @@ func ParseJoin(s string) (Join, error) {
 	}
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil || host == "" {
-		return Join{}, fmt.Errorf("join string address %q must be host:port", addr)
+		return Join{}, errors.New("join string address must be host:port")
 	}
 	if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
-		return Join{}, fmt.Errorf("join string address %q has an invalid port", addr)
+		return Join{}, errors.New("join string address has an invalid port")
 	}
 	return Join{Addr: addr, Pin: pin, Code: code}, nil
 }

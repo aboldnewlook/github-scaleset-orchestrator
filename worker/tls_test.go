@@ -89,3 +89,22 @@ func TestPinnedTLSConfigRequiresTLS13(t *testing.T) {
 		t.Fatalf("MinVersion = %x, want TLS 1.3", got)
 	}
 }
+
+func TestPinnedTLSConfigRefusesInvalidPin(t *testing.T) {
+	now := time.Now()
+	cert, _ := testCert(t, now.Add(-time.Hour), now.Add(time.Hour))
+	for _, pin := range []string{"", "nothex", "abcd"} {
+		srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
+		srv.TLS = &tls.Config{Certificates: []tls.Certificate{cert}}
+		srv.StartTLS()
+		client := &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{TLSClientConfig: PinnedTLSConfig(pin)}}
+		resp, err := client.Get(srv.URL)
+		if err == nil {
+			_ = resp.Body.Close()
+		}
+		srv.Close()
+		if err == nil || !strings.Contains(err.Error(), "no valid router pin configured") {
+			t.Errorf("pin %q: GET error = %v, want \"no valid router pin configured\"", pin, err)
+		}
+	}
+}

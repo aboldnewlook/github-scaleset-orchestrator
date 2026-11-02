@@ -30,6 +30,9 @@ func PinnedTLSConfig(pin string) *tls.Config {
 		// hostname verification.
 		InsecureSkipVerify: true, //nolint:gosec // #nosec G402 -- pinned SPKI is the trust anchor (design spec §4.2)
 		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+			if !pinPattern.MatchString(want) {
+				return errors.New("no valid router pin configured")
+			}
 			if len(rawCerts) == 0 {
 				return errors.New("router presented no certificate")
 			}

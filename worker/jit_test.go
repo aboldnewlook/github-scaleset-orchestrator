@@ -105,3 +105,68 @@ func TestVerifyJIT(t *testing.T) {
 		})
 	}
 }
+
+func jitWith(t *testing.T, runnerJSON string) string {
+	t.Helper()
+	return encodeJIT(t, runnerJSON, base64.StdEncoding)
+}
+
+func TestVerifyJITWildcardAndUnicodeOwners(t *testing.T) {
+	tests := []struct {
+		name  string
+		url   string
+		check OfferCheck
+	}{
+		{"star owner with */* allowlist", "https://github.com/*/x", OfferCheck{Repo: "*/x", Allowlist: []string{"*/*"}}},
+		{"star owner with star owner literal", "https://github.com/*/x", OfferCheck{Repo: "*/x", Allowlist: []string{"*/x"}}},
+		{"Kelvin sign in repo name", "https://github.com/o/Key", OfferCheck{Repo: "o/Key", Allowlist: []string{"o/key"}}},
+		{"Kelvin sign offer vs ascii JIT", "https://github.com/o/key", OfferCheck{Repo: "o/Key", Allowlist: []string{"o/*"}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := VerifyJIT(jitWith(t, runnerFile(tt.url)), tt.check); err == nil {
+				t.Fatal("VerifyJIT() accepted it; want a refusal")
+			}
+		})
+	}
+	if MatchRepo([]string{"o/key"}, "o/Key") {
+		t.Error("MatchRepo folded the Kelvin sign")
+	}
+	if MatchRepo([]string{"*/*"}, "*/x") {
+		t.Error("MatchRepo treated * as a literal owner")
+	}
+}
+
+func TestVerifyJITServerURLs(t *testing.T) {
+	allow := []string{"o/*"}
+	mk := func(extra string) string {
+		return jitWith(t, `{"gitHubUrl":"https://github.com/o/r"`+extra+`}`)
+	}
+	tests := []struct {
+		name    string
+		encoded string
+		check   OfferCheck
+		wantErr bool
+	}{
+		{"real-shaped github JIT", mk(`,"serverUrl":"https://pipelines.actions.githubusercontent.com/abc","serverUrlV2":"https://broker.actions.githubusercontent.com/"`), OfferCheck{Repo: "o/r", Allowlist: allow}, false},
+		{"forged serverUrl", mk(`,"serverUrl":"https://evil.example/abc"`), OfferCheck{Repo: "o/r", Allowlist: allow}, true},
+		{"forged serverUrlV2", mk(`,"serverUrl":"https://pipelines.actions.githubusercontent.com/","serverUrlV2":"https://evil.example/"`), OfferCheck{Repo: "o/r", Allowlist: allow}, true},
+		{"lookalike suffix", mk(`,"serverUrl":"https://evilgithubusercontent.com/"`), OfferCheck{Repo: "o/r", Allowlist: allow}, true},
+		{"http serverUrl", mk(`,"serverUrl":"http://pipelines.actions.githubusercontent.com/"`), OfferCheck{Repo: "o/r", Allowlist: allow}, true},
+		{"userinfo serverUrl", mk(`,"serverUrl":"https://github.com@evil.example/"`), OfferCheck{Repo: "o/r", Allowlist: allow}, true},
+		{"sim host without override", jitWith(t, `{"gitHubUrl":"http://127.0.0.1:8080/o/r","serverUrl":"http://127.0.0.1:8080/"}`), OfferCheck{Repo: "o/r", Allowlist: allow}, true},
+		{"sim host with TrustedHosts", jitWith(t, `{"gitHubUrl":"http://127.0.0.1:8080/o/r","serverUrl":"http://127.0.0.1:8080/"}`), OfferCheck{Repo: "o/r", Allowlist: allow, TrustedHosts: []string{"127.0.0.1"}}, false},
+		{"TrustedHosts still rejects others", mk(`,"serverUrl":"https://evil.example/"`), OfferCheck{Repo: "o/r", Allowlist: allow, TrustedHosts: []string{"127.0.0.1"}}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := VerifyJIT(tt.encoded, tt.check)
+			if tt.wantErr != (err != nil) {
+				t.Fatalf("VerifyJIT() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if err != nil && !errors.Is(err, ErrJITHost) && !errors.Is(err, ErrJITMalformed) {
+				t.Fatalf("VerifyJIT() error = %v, want ErrJITHost or ErrJITMalformed", err)
+			}
+		})
+	}
+}
