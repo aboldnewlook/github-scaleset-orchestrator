@@ -4,6 +4,7 @@ go 1.27.3
 
 require (
 	connectrpc.com/connect v1.21.1
+	github.com/Microsoft/go-winio v0.6.4
 	github.com/actions/scaleset v0.5.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
