@@ -72,12 +72,12 @@ func DockerSocketPath(host string) (string, error) {
 }
 
 func NewDockerWorker(cfg DockerConfig, logger *slog.Logger) (*DockerWorker, error) {
-	socket, err := DockerSocketPath(cfg.Host)
+	dial, err := DockerDialer(cfg.Host)
 	if err != nil {
 		return nil, err
 	}
 	transport := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-		return (&net.Dialer{}).DialContext(ctx, "unix", socket)
+		return dial(ctx)
 	}}
 	return &DockerWorker{
 		image: cfg.Image, instanceID: cfg.InstanceID, memoryMB: cfg.MemoryMB, cpus: cfg.CPUs,
