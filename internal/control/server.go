@@ -317,6 +317,9 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn, requireAuth bool
 	}
 
 	s.logger.Info("control request", "remote", conn.RemoteAddr(), "method", req.Method)
-	resp := s.handler.HandleRequest(WithTransport(ctx, !requireAuth), req)
+	// The transport comes from the connection itself, not from the auth
+	// setting, so a future no-auth TCP option cannot open workers_*.
+	_, isUnix := conn.LocalAddr().(*net.UnixAddr)
+	resp := s.handler.HandleRequest(WithTransport(ctx, isUnix), req)
 	enc.Encode(resp) //nolint:errcheck
 }

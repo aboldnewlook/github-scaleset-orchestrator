@@ -121,7 +121,7 @@ func TestLiveStatusIncludesWorkers(t *testing.T) {
 		list:          []control.WorkerLiveStatus{{Name: "mac", ID: "0123456789abcdef", Connected: true, Availability: "available", Slots: 4, Classes: []string{"linux-arm64"}}},
 	}
 	rt := service.NewRuntime(admin, func() {}, testLogger())
-	status, err := rt.LiveStatus(context.Background())
+	status, err := rt.LiveStatus(control.WithTransport(context.Background(), true))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,5 +135,25 @@ func TestLiveStatusIncludesWorkers(t *testing.T) {
 	var back control.LiveStatusResult
 	if err := json.Unmarshal(data, &back); err != nil || len(back.Workers) != 1 || back.Workers[0].Slots != 4 {
 		t.Fatalf("round trip = %+v, %v", back.Workers, err)
+	}
+}
+
+func TestLiveStatusOmitsWorkersOutsideTheUnixSocket(t *testing.T) {
+	admin := &mockWorkerAdmin{
+		mockOrchState: &mockOrchState{maxRunners: 1},
+		list:          []control.WorkerLiveStatus{{Name: "mac", ID: "0123456789abcdef"}},
+	}
+	rt := service.NewRuntime(admin, func() {}, testLogger())
+	for name, ctx := range map[string]context.Context{
+		"no transport": context.Background(),
+		"tcp":          control.WithTransport(context.Background(), false),
+	} {
+		status, err := rt.LiveStatus(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(status.Workers) != 0 {
+			t.Errorf("%s: live_status leaked workers: %+v", name, status.Workers)
+		}
 	}
 }

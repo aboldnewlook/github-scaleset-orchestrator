@@ -26,6 +26,7 @@ import (
 	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/orchestrator"
 	"github.com/aboldnewlook/github-scaleset-orchestrator/runner"
 	"github.com/aboldnewlook/github-scaleset-orchestrator/worker"
+	"golang.org/x/net/netutil"
 )
 
 // Worker listener connection limits. WriteTimeout stays 0 on purpose:
@@ -201,6 +202,7 @@ func (r *Router) startWorkers(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("listening for workers on %s: %w", r.cfg.Workers.Listen, err)
 	}
+	ln = newWorkerListener(ln, nets, maxWorkerConns)
 	r.mu.Lock()
 	r.addr = ln.Addr().String()
 	r.mu.Unlock()
@@ -336,4 +338,15 @@ func (r *Router) ownerScopes(b fleet.Bounds) []string {
 	}
 	sort.Strings(scopes)
 	return scopes
+}
+
+// maxWorkerConns caps simultaneous worker connections (each worker holds a
+// few h2 connections; this leaves headroom while bounding file descriptors).
+const maxWorkerConns = 256
+
+// newWorkerListener closes peers outside nets before any TLS handshake, then
+// caps the connections that remain at max. The allow filter sits inside the
+// limit so rejected peers never occupy a slot.
+func newWorkerListener(ln net.Listener, nets []*net.IPNet, max int) net.Listener {
+	return netutil.LimitListener(fleet.AllowListener(ln, nets), max)
 }

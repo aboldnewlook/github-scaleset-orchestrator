@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/control"
+	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/event"
 	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/fleet"
 	"github.com/aboldnewlook/github-scaleset-orchestrator/runner"
 	"github.com/aboldnewlook/github-scaleset-orchestrator/worker"
@@ -187,10 +189,21 @@ func (r *Router) RevokeWorker(ctx context.Context, name string) error {
 	if err != nil {
 		return workerErr(name, err)
 	}
-	if err := r.fleet.RevokeWorker(ctx, rec.ID); err != nil {
-		r.logger.Warn("revoked worker had no live session to end", "name", name, "error", err)
+	// fleet.RevokeWorker publishes worker.revoked only for a live member and
+	// returns nil without one, so the router publishes it for a worker that
+	// is not connected (same payload as the fleet's).
+	live := false
+	for _, m := range r.fleet.Members() {
+		if m.WorkerID == rec.ID {
+			live = true
+			break
+		}
 	}
-	// fleet.RevokeWorker publishes the worker.revoked event.
+	_ = r.fleet.RevokeWorker(ctx, rec.ID) // always nil today; the revoke is already recorded
+	if !live && r.bus != nil {
+		data, _ := json.Marshal(map[string]any{"worker": rec.Name})
+		r.bus.Publish(event.Event{Time: time.Now(), Type: event.EventWorkerRevoked, Payload: data})
+	}
 	r.logger.Info("worker revoked", "name", name)
 	return nil
 }

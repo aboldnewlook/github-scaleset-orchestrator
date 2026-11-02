@@ -116,7 +116,8 @@ func (r *Runtime) LiveStatus(ctx context.Context) (*control.LiveStatusResult, er
 		MaxRunners: r.orch.MaxRunners(),
 		Available:  r.orch.AvailableSlots(),
 	}
-	if admin, ok := r.orch.(WorkerAdmin); ok {
+	// Worker names and IDs are unix-socket-only, like workers_list.
+	if admin, ok := r.orch.(WorkerAdmin); ok && control.IsUnixSocket(ctx) {
 		result.Workers = admin.ListWorkers()
 	}
 	return result, nil

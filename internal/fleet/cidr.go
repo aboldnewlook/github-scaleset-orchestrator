@@ -48,3 +48,31 @@ func allowCIDRs(next http.Handler, nets []*net.IPNet) http.Handler {
 		next.ServeHTTP(w, r)
 	})
 }
+
+// AllowListener wraps ln so connections from outside nets are closed in
+// Accept, before any TLS handshake or HTTP parsing. Empty nets means
+// DefaultAllowNets(). The in-mux allowCIDRs middleware stays as defence in depth.
+func AllowListener(ln net.Listener, nets []*net.IPNet) net.Listener {
+	if len(nets) == 0 {
+		nets = DefaultAllowNets()
+	}
+	return &allowListener{Listener: ln, nets: nets}
+}
+
+type allowListener struct {
+	net.Listener
+	nets []*net.IPNet
+}
+
+func (l *allowListener) Accept() (net.Conn, error) {
+	for {
+		c, err := l.Listener.Accept()
+		if err != nil {
+			return nil, err
+		}
+		if remoteAllowed(c.RemoteAddr().String(), l.nets) {
+			return c, nil
+		}
+		_ = c.Close()
+	}
+}
