@@ -661,6 +661,9 @@ func TestDockerWorkerWaitErrorDetachKeepsContainer(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), "waiting for runner container") {
 				t.Fatalf("Wait error = %v, want a wait failure", err)
 			}
+			if got, want := errors.Is(err, ErrWaitInterrupted), tt.policy == DetachOnCancel; got != want {
+				t.Fatalf("errors.Is(err, ErrWaitInterrupted) = %v, want %v (error: %v)", got, want, err)
+			}
 			if n := deletes.Load(); n != tt.wantDeletes {
 				t.Fatalf("deletes = %d, want %d", n, tt.wantDeletes)
 			}

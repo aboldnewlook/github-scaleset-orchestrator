@@ -199,6 +199,12 @@ func (w *DockerWorker) RemoveOrphans(ctx context.Context, keep map[string]bool) 
 // example because it was removed while the worker was not running.
 var ErrContainerNotFound = errors.New("runner container not found")
 
+// ErrWaitInterrupted reports that Wait's request to the engine failed (engine
+// down or restarting, connection dropped) while the container was left in
+// place under DetachOnCancel. The container may still be running: the caller
+// should Wait again, not treat it as an exit.
+var ErrWaitInterrupted = errors.New("waiting for the runner container was interrupted")
+
 // Run starts a runner container and blocks until it exits. It is Start
 // followed by Wait, except that it follows the container by the ID Docker
 // returned. Cancelling ctx removes the container (KillOnCancel, gso's local
@@ -298,7 +304,7 @@ func (w *DockerWorker) wait(ctx context.Context, ref, name string) error {
 		// The wait itself failed while the container may still be running
 		// (dockerd dropped the long-poll). Leave it for the caller to re-attach.
 		removeOnReturn = false
-		return fmt.Errorf("waiting for runner container: %w", err)
+		return fmt.Errorf("waiting for runner container: %w: %w", ErrWaitInterrupted, err)
 	}
 	// Fetch logs with an independent context, including after cancellation.
 	logCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
