@@ -297,9 +297,21 @@ See [docs/unraid-portainer.md](docs/unraid-portainer.md) for a complete deployme
 
 ## Remote Workers
 
-A gso router can place jobs on other machines on the same network. The router keeps the PATs and the GitHub scale sets. Each worker holds only a per-worker credential and runs the jobs it accepts in sibling Docker containers.
+A gso router can place jobs on other machines on the same network. The router keeps the PATs and the GitHub scale sets. Each worker holds only a per-worker credential and runs the jobs it accepts in sibling Docker containers. The design is in `docs/design/remote-workers.md`.
 
-**1. Add a worker on the router.** This works on the router's local control socket only, never with `--remote`:
+**1. Open the worker listener on the router.**
+
+```yaml
+max_runners: 0                # the router runs no jobs itself (needs workers.listen)
+runner:
+  instance_id: unraid         # stable identity: scale-set names, session owner
+workers:
+  listen: ":9200"
+  advertise: "unraid.lan:9200"   # the address workers dial; required for join strings
+  allow_cidrs: [192.168.1.0/24]  # default: private ranges only
+```
+
+**2. Add a worker on the router.** This works on the router's local control socket only, never with `--remote`:
 
 ```bash
 gso workers add mac-m1 --classes linux-arm64 --slots 4
@@ -307,7 +319,7 @@ gso workers add mac-m1 --classes linux-arm64 --slots 4
 
 It prints a single-use join string (`gso-join:v1:...`), valid for 15 minutes.
 
-**2. Start the worker** on the other machine:
+**3. Start the worker** on the other machine:
 
 ```bash
 gso worker --join 'gso-join:v1:...' --executor docker --slots 2 \
