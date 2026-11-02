@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 
 	"connectrpc.com/connect"
@@ -65,11 +66,51 @@ func Enroll(ctx context.Context, o EnrollOptions) (string, State, error) {
 // http.Client has no Timeout because Subscribe is a long-lived stream; every
 // unary call carries its own context deadline.
 func newRPC(addr, pin string) workerv1connect.WorkerServiceClient {
-	transport := &http.Transport{
+	return workerv1connect.NewWorkerServiceClient(&http.Client{Transport: newTransport(pin)}, "https://"+addr)
+}
+
+// HTTP/2 liveness pings: a connection whose peer vanished without a FIN or
+// RST (laptop sleep, NAT timeout, cable pulled) is detected and closed instead
+// of stalling every call. Variables so tests can shorten them.
+var (
+	pingSendTimeout = 15 * time.Second
+	pingTimeout     = 10 * time.Second
+)
+
+func newTransport(pin string) *http.Transport {
+	return &http.Transport{
 		TLSClientConfig:     PinnedTLSConfig(pin),
 		ForceAttemptHTTP2:   true,
 		TLSHandshakeTimeout: 10 * time.Second,
 		IdleConnTimeout:     90 * time.Second,
+		HTTP2:               &http.HTTP2Config{SendPingTimeout: pingSendTimeout, PingTimeout: pingTimeout},
 	}
-	return workerv1connect.NewWorkerServiceClient(&http.Client{Transport: transport}, "https://"+addr)
+}
+
+// resettableTransport lets the client abandon a wedged connection pool and
+// dial afresh: reset swaps in a new transport, and the old one is left to its
+// own ping timeouts.
+type resettableTransport struct {
+	pin string
+	mu  sync.Mutex
+	t   *http.Transport
+}
+
+func newResettableTransport(pin string) *resettableTransport {
+	return &resettableTransport{pin: pin, t: newTransport(pin)}
+}
+
+func (r *resettableTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	r.mu.Lock()
+	t := r.t
+	r.mu.Unlock()
+	return t.RoundTrip(req)
+}
+
+func (r *resettableTransport) reset() {
+	r.mu.Lock()
+	old := r.t
+	r.t = newTransport(r.pin)
+	r.mu.Unlock()
+	old.CloseIdleConnections()
 }

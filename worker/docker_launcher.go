@@ -2,13 +2,17 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"time"
 
 	"github.com/aboldnewlook/github-scaleset-orchestrator/runner"
 )
 
 type dockerLauncher struct {
-	w *runner.DockerWorker
+	w          *runner.DockerWorker
+	backoffMin time.Duration // Wait retry backoff while the engine is unreachable
+	backoffMax time.Duration
 }
 
 // NewDockerLauncher runs Linux-class runners as sibling containers on the
@@ -16,7 +20,7 @@ type dockerLauncher struct {
 // OnCancel: runner.DetachOnCancel so that stopping the worker leaves jobs
 // running for the next start to re-attach to.
 func NewDockerLauncher(w *runner.DockerWorker) Launcher {
-	return &dockerLauncher{w: w}
+	return &dockerLauncher{w: w, backoffMin: time.Second, backoffMax: 15 * time.Second}
 }
 
 func (d *dockerLauncher) Kind() runner.ExecutorKind { return runner.ExecutorDocker }
@@ -42,8 +46,25 @@ func (d *dockerLauncher) Start(ctx context.Context, rec RunnerRecord, jit, cache
 	return d.w.ForRepo(rec.Repo, cache).Start(ctx, rec.Name, jit)
 }
 
+// Wait follows the runner until it exits. While the engine is unreachable
+// (runner.ErrWaitInterrupted: Docker Desktop not up yet, dockerd restarting,
+// the laptop asleep) the container may well be running, so Wait retries with
+// capped backoff instead of reporting an exit. A missing container
+// (runner.ErrContainerNotFound), an exit status and ctx cancellation return at once.
 func (d *dockerLauncher) Wait(ctx context.Context, rec RunnerRecord) error {
-	return d.w.ForRepo(rec.Repo, "none").Wait(ctx, rec.Name)
+	delay := d.backoffMin
+	for {
+		err := d.w.ForRepo(rec.Repo, "none").Wait(ctx, rec.Name)
+		if err == nil || ctx.Err() != nil || !errors.Is(err, runner.ErrWaitInterrupted) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(delay):
+		}
+		delay = min(delay*2, d.backoffMax)
+	}
 }
 
 func (d *dockerLauncher) Kill(ctx context.Context, rec RunnerRecord) error {

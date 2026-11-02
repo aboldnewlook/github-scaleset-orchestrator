@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
+	"net/http"
 	"slices"
 	"strings"
 	"sync"
@@ -60,6 +61,9 @@ const (
 	killTimeout      = 30 * time.Second
 	maxReasonLen     = 200
 	maxPending       = 256
+	// routerLostTimeout is the router's worker-lost timer (spec §4.5): past it
+	// the router has dropped the session, so the client reconnects.
+	routerLostTimeout = 30 * time.Second
 )
 
 // Config configures a Client.
@@ -99,6 +103,10 @@ type Client struct {
 	logger *slog.Logger
 	rpc    workerv1connect.WorkerServiceClient
 	byKind map[runner.ExecutorKind]Launcher
+
+	transport   *resettableTransport
+	hbFailLimit time.Duration // heartbeats may fail this long before the session is dropped
+	hbFailSince time.Time     // first failure of the current streak (guarded by mu)
 
 	recMu sync.Mutex // serialises Records
 	wake  chan struct{}
@@ -169,15 +177,18 @@ func New(cfg Config) (*Client, error) {
 		}
 		byKind[l.Kind()] = l
 	}
+	rt := newResettableTransport(cfg.Pin)
 	return &Client{
-		cfg:       cfg,
-		logger:    cfg.Logger.With("worker", cfg.Name),
-		rpc:       newRPC(cfg.DialAddr, cfg.Pin),
-		byKind:    byKind,
-		wake:      make(chan struct{}, 1),
-		allowlist: slices.Clone(cfg.Allowlist),
-		mode:      mode,
-		active:    make(map[string]*activeRunner),
+		cfg:         cfg,
+		logger:      cfg.Logger.With("worker", cfg.Name),
+		rpc:         workerv1connect.NewWorkerServiceClient(&http.Client{Transport: rt}, "https://"+cfg.DialAddr),
+		transport:   rt,
+		hbFailLimit: routerLostTimeout,
+		byKind:      byKind,
+		wake:        make(chan struct{}, 1),
+		allowlist:   slices.Clone(cfg.Allowlist),
+		mode:        mode,
+		active:      make(map[string]*activeRunner),
 	}, nil
 }
 
@@ -199,6 +210,9 @@ func (c *Client) Run(ctx context.Context) error {
 	runCtx, cancel := context.WithCancel(ctx)
 	defer c.wg.Wait()
 	defer cancel()
+	// A drain deadline that fires after Run returns must not kill containers
+	// the next Run re-attaches to.
+	defer c.stopDrainTimer()
 
 	c.reattach(runCtx)
 
@@ -225,6 +239,15 @@ func (c *Client) Run(ctx context.Context) error {
 			return nil
 		case <-time.After(delay):
 		}
+	}
+}
+
+func (c *Client) stopDrainTimer() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.drainTimer != nil {
+		c.drainTimer.Stop()
+		c.drainTimer = nil
 	}
 }
 
@@ -364,11 +387,11 @@ func (c *Client) session(ctx context.Context) (bool, error) {
 		case d := <-directives:
 			c.handleDirective(ctx, sessionID, d)
 		case <-ticker.C:
-			if err := c.heartbeat(ctx, sessionID); err != nil {
+			if err := c.heartbeat(ctx, sessionID, interval); err != nil {
 				return true, err
 			}
 		case <-c.wake:
-			if err := c.heartbeat(ctx, sessionID); err != nil {
+			if err := c.heartbeat(ctx, sessionID, interval); err != nil {
 				return true, err
 			}
 		}
@@ -433,6 +456,7 @@ func (c *Client) applySession(m *workerv1.OpenSessionResponse, execErr error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.connected = true
+	c.hbFailSince = time.Time{}
 	c.sessionID = m.GetSessionId()
 	c.effSlots = int(m.GetEffective().GetSlots())
 	c.effClasses = eff
@@ -497,7 +521,7 @@ func (c *Client) subscribe(ctx context.Context, sessionID string, heartbeat time
 	}
 }
 
-func (c *Client) heartbeat(ctx context.Context, sessionID string) error {
+func (c *Client) heartbeat(ctx context.Context, sessionID string, interval time.Duration) error {
 	c.mu.Lock()
 	req := &workerv1.HeartbeatRequest{
 		SessionId:    sessionID,
@@ -506,7 +530,7 @@ func (c *Client) heartbeat(ctx context.Context, sessionID string) error {
 		AcceptPublic: EffectiveAcceptPublic(c.mode, c.routerDefault),
 	}
 	c.mu.Unlock()
-	hctx, cancel := context.WithTimeout(ctx, rpcTimeout)
+	hctx, cancel := context.WithTimeout(ctx, min(rpcTimeout, 2*interval))
 	defer cancel()
 	resp, err := c.rpc.Heartbeat(hctx, authed(c, req))
 	if err != nil {
@@ -517,9 +541,27 @@ func (c *Client) heartbeat(ctx context.Context, sessionID string) error {
 			return fmt.Errorf("heartbeat: %w", err)
 		}
 		c.setErr(err)
-		c.logger.Warn("heartbeat failed; keeping the session", "error", err)
+		// Keep the session through brief trouble (the router's lost timer is
+		// the authority), but a streak longer than that timer means the router
+		// has already dropped us or the connection is dead: reconnect on a
+		// fresh connection instead of waiting on it.
+		c.mu.Lock()
+		now := time.Now()
+		if c.hbFailSince.IsZero() {
+			c.hbFailSince = now
+		}
+		streak := now.Sub(c.hbFailSince)
+		c.mu.Unlock()
+		if streak >= c.hbFailLimit {
+			c.transport.reset()
+			return fmt.Errorf("heartbeat failing for %s: %w", streak.Round(time.Millisecond), err)
+		}
+		c.logger.Warn("heartbeat failed; keeping the session", "error", err, "failing_for", streak)
 		return nil
 	}
+	c.mu.Lock()
+	c.hbFailSince = time.Time{}
+	c.mu.Unlock()
 	if p := resp.Msg.GetPolicy(); p != nil {
 		c.mu.Lock()
 		changed := c.routerDefault != p.GetWorkerDefaultAccept()
