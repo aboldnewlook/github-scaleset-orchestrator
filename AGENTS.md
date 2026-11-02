@@ -17,7 +17,7 @@ gso is a multi-repo GitHub Actions self-hosted runner orchestrator written in Go
 | `cmd/` | Cobra CLI commands. `root.go` defines the root command and `--config` flag. `format.go` has table output helpers. |
 | `internal/config/` | YAML config loading (`config.go`) and multi-source token resolution (`token.go`). `TokenSource` resolves tokens from env vars, OS keychain, or files. |
 | `internal/orchestrator/` | Top-level `Run()` loop. Creates a scale set listener per repo, shares a concurrency semaphore. Handles stale session recovery (409 Conflict). |
-| `internal/scaler/` | Implements `listener.Scaler` interface from `actions/scaleset`. One `Scaler` per repo. Acquires semaphore slots, generates JIT configs, spawns runner goroutines. |
+| `internal/scaler/` | Implements `listener.Scaler` (`Scale(msg)`, actions/scaleset v0.5). One `Scaler` per repo, kept across listener restarts. Caches statistics for idle polls, dedupes redelivered job messages, never returns an error (an error stops the listener), takes a semaphore slot without blocking before minting a JIT config, spawns runner goroutines. |
 | `runner/` (public) | `Manager` downloads and caches the runner binary with SHA256 verification. `Worker` creates temp directories and runs runner subprocesses. `DockerWorker` runs runners in sibling containers. `extract.go` handles tar.gz extraction with zip-slip protection. Imported by other gso workers; must not import `internal/*`, cobra, viper, bubbletea or `actions/scaleset` (`runner/deps_test.go`). |
 | `internal/event/` | `Event` types, fan-out `Bus` with non-blocking publish, and `FileStore` for JSONL persistence. Decouples the orchestrator from output/logging concerns. |
 | `internal/service/` | `Runtime` wraps live orchestrator state and dispatches control socket requests. Implements `HandleRequest` for methods like `live_status`, `recycle_runner`, `set_max_runners`, `shutdown`. |
@@ -176,6 +176,6 @@ Run all tests: `go test ./...`
 - `internal/service/runtime.go` -- Changes to `OrchestratorState` interface require matching changes in the orchestrator.
 - `main.go` -- Being migrated to use Cobra (`cmd/root.go`). The old flag-based entry point will be replaced.
 
-### External dependency: `actions/scaleset` v0.2.0
+### External dependency: `actions/scaleset` v0.5.0
 
-The `listener.Scaler` interface is defined by this library. Do not change the method signatures of `HandleDesiredRunnerCount`, `HandleJobStarted`, or `HandleJobCompleted` in `internal/scaler/scaler.go` -- they must match the interface.
+The `listener.Scaler` interface is defined by this library. Do not change the signature of `Scale(ctx, *scaleset.RunnerScaleSetMessage) error` in `internal/scaler/scaler.go` -- it must match the interface.

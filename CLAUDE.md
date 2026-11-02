@@ -14,7 +14,7 @@ go run . -config config.yaml   # Run the orchestrator
 ## Important Notes
 
 - `config.yaml` is gitignored -- it contains token references. Use `config.example.yaml` as a template.
-- The project depends on `actions/scaleset` v0.2.0 (the Scale Set API client/listener library).
+- The project depends on `actions/scaleset` v0.5.0 (the Scale Set API client/listener library).
 - Go version: 1.27.3 (floor set by actions/scaleset v0.5.0, adopted in P2a)
 - Targets: macOS (native) and Linux (Docker)
 
@@ -25,7 +25,7 @@ go run . -config config.yaml   # Run the orchestrator
 | `cmd/` | Cobra CLI commands and output formatting |
 | `internal/config/` | YAML config loading and token resolution (env, keychain, file) |
 | `internal/orchestrator/` | Per-repo scale set listeners with shared concurrency semaphore |
-| `internal/scaler/` | `listener.Scaler` implementation -- spawns JIT ephemeral runners |
+| `internal/scaler/` | `listener.Scaler` (scaleset v0.5 `Scale(msg)`) -- caches statistics, dedupes redelivered job messages, spawns JIT ephemeral runners |
 | `runner/` | Public: runner binary download/caching, subprocess and Docker executors |
 | `internal/event/` | Fan-out event bus with JSONL file persistence |
 | `internal/service/` | Runtime service -- live state access via control socket |
