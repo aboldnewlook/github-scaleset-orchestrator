@@ -187,17 +187,13 @@ func (p *pollingScaleSetClient) GetMessage(ctx context.Context, _, capacity int)
 
 func (*pollingScaleSetClient) DeleteMessage(context.Context, int) error { return nil }
 
+func (*pollingScaleSetClient) AcquireJobs(_ context.Context, ids []int64) ([]int64, error) {
+	return ids, nil
+}
+
 type noOpScaleSetScaler struct{}
 
-func (noOpScaleSetScaler) HandleDesiredRunnerCount(context.Context, int) (int, error) {
-	return 0, nil
-}
-func (noOpScaleSetScaler) HandleJobStarted(context.Context, *scaleset.JobStarted) error {
-	return nil
-}
-func (noOpScaleSetScaler) HandleJobCompleted(context.Context, *scaleset.JobCompleted) error {
-	return nil
-}
+func (noOpScaleSetScaler) Scale(context.Context, *scaleset.RunnerScaleSetMessage) error { return nil }
 
 func TestSetMaxRunnersChangesAdvertisedCapacityOnNextPoll(t *testing.T) {
 	client := &pollingScaleSetClient{

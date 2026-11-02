@@ -217,9 +217,10 @@ func TestScaleDecisionRecordsChangesWithoutRepeatingIdlePolls(t *testing.T) {
 		runners: map[string]context.CancelFunc{"already-running": func() {}},
 	}
 
+	s.stats = scaleset.RunnerScaleSetStatistic{TotalAssignedJobs: 1}
 	for range 2 {
-		if got, err := s.HandleDesiredRunnerCount(context.Background(), 1); err != nil || got != 1 {
-			t.Fatalf("HandleDesiredRunnerCount() = (%d, %v), want (1, nil)", got, err)
+		if err := s.Scale(context.Background(), nil); err != nil || len(s.Runners()) != 1 {
+			t.Fatalf("Scale(idle) = %v with %d runners, want nil with 1", err, len(s.Runners()))
 		}
 	}
 	select {
@@ -261,9 +262,7 @@ func TestJobCompletedReleasesCapacityBeforeNextScaleDecision(t *testing.T) {
 		runners:  map[string]context.CancelFunc{"done": func() { cancelled = true }},
 		releases: map[string]func(){"done": release},
 	}
-	if err := s.HandleJobCompleted(context.Background(), &scaleset.JobCompleted{RunnerName: "done"}); err != nil {
-		t.Fatal(err)
-	}
+	s.onCompleted(&scaleset.JobCompleted{RunnerName: "done"})
 	if !cancelled {
 		t.Fatal("completed runner was not cancelled")
 	}
@@ -289,9 +288,7 @@ func TestJobEventsIncludeMeasuredDurations(t *testing.T) {
 		bus: bus, spawnedAt: map[string]time.Time{"runner-1": time.Now().Add(-3 * time.Second)},
 		runners: map[string]context.CancelFunc{"runner-1": func() {}},
 	}
-	if err := s.HandleJobStarted(context.Background(), &scaleset.JobStarted{RunnerName: "runner-1"}); err != nil {
-		t.Fatal(err)
-	}
+	s.onStarted(&scaleset.JobStarted{RunnerName: "runner-1"})
 	started := <-events
 	var startedPayload map[string]any
 	if err := json.Unmarshal(started.Payload, &startedPayload); err != nil {
@@ -304,9 +301,7 @@ func TestJobEventsIncludeMeasuredDurations(t *testing.T) {
 	s.mu.Lock()
 	s.jobStartedAt["runner-1"] = time.Now().Add(-2 * time.Second)
 	s.mu.Unlock()
-	if err := s.HandleJobCompleted(context.Background(), &scaleset.JobCompleted{RunnerName: "runner-1"}); err != nil {
-		t.Fatal(err)
-	}
+	s.onCompleted(&scaleset.JobCompleted{RunnerName: "runner-1"})
 	completed := <-events
 	var completedPayload map[string]any
 	if err := json.Unmarshal(completed.Payload, &completedPayload); err != nil {
@@ -325,12 +320,8 @@ func TestUnknownJobEventsOmitUnmeasuredDurations(t *testing.T) {
 	id, events := bus.Subscribe(2)
 	defer bus.Unsubscribe(id)
 	s := &Scaler{repo: "org/repo", logger: slog.New(slog.NewTextHandler(io.Discard, nil)), bus: bus}
-	if err := s.HandleJobStarted(context.Background(), &scaleset.JobStarted{RunnerName: "unknown"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.HandleJobCompleted(context.Background(), &scaleset.JobCompleted{RunnerName: "unknown"}); err != nil {
-		t.Fatal(err)
-	}
+	s.onStarted(&scaleset.JobStarted{RunnerName: "unknown"})
+	s.onCompleted(&scaleset.JobCompleted{RunnerName: "unknown"})
 	for _, key := range []string{"runner_startup_ms", "job_duration_ms"} {
 		e := <-events
 		var payload map[string]any
@@ -356,7 +347,7 @@ func TestRunnerExitEventIncludesElapsedTime(t *testing.T) {
 			time.Sleep(20 * time.Millisecond)
 			return nil
 		}), NewSemaphore(1), slog.New(slog.NewTextHandler(io.Discard, nil)), bus)
-	if _, err := s.HandleDesiredRunnerCount(context.Background(), 1); err != nil {
+	if err := s.Scale(context.Background(), assigned(1)); err != nil {
 		t.Fatal(err)
 	}
 	timeout := time.After(time.Second)
@@ -381,13 +372,17 @@ func TestRunnerExitEventIncludesElapsedTime(t *testing.T) {
 }
 
 type fakeJITConfigGenerator struct {
-	mu    sync.Mutex
-	calls int
+	mu          sync.Mutex
+	calls       int
+	names       []string
+	scaleSetIDs []int
 }
 
-func (f *fakeJITConfigGenerator) GenerateJitRunnerConfig(_ context.Context, _ *scaleset.RunnerScaleSetJitRunnerSetting, _ int) (*scaleset.RunnerScaleSetJitRunnerConfig, error) {
+func (f *fakeJITConfigGenerator) GenerateJitRunnerConfig(_ context.Context, setting *scaleset.RunnerScaleSetJitRunnerSetting, scaleSetID int) (*scaleset.RunnerScaleSetJitRunnerConfig, error) {
 	f.mu.Lock()
 	f.calls++
+	f.names = append(f.names, setting.Name)
+	f.scaleSetIDs = append(f.scaleSetIDs, scaleSetID)
 	f.mu.Unlock()
 	return &scaleset.RunnerScaleSetJitRunnerConfig{EncodedJITConfig: "test"}, nil
 }
@@ -396,6 +391,19 @@ func (f *fakeJITConfigGenerator) Calls() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.calls
+}
+
+// Names returns the runner names minted, in mint order.
+func (f *fakeJITConfigGenerator) Names() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.names...)
+}
+
+func (f *fakeJITConfigGenerator) ScaleSetIDs() []int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]int(nil), f.scaleSetIDs...)
 }
 
 type controlledWorker struct {
@@ -432,18 +440,25 @@ func TestCompletedRunnerHandsCapacityToNextAssignedJob(t *testing.T) {
 	sem := NewSemaphore(1)
 	s := New("org/repo", 42, client, worker, sem, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
 
-	if _, err := s.HandleDesiredRunnerCount(ctx, 1); err != nil {
+	if err := s.Scale(ctx, assigned(1)); err != nil {
 		t.Fatal(err)
 	}
 	first := <-worker.started
-	if _, err := s.HandleDesiredRunnerCount(ctx, 1); err != nil {
+	if err := s.Scale(ctx, assigned(1)); err != nil {
 		t.Fatal(err)
 	}
 	if got := client.Calls(); got != 1 {
 		t.Fatalf("duplicate scale callback generated %d JIT configs, want 1", got)
 	}
 
-	if err := s.HandleJobCompleted(ctx, &scaleset.JobCompleted{RunnerName: first}); err != nil {
+	done := &scaleset.RunnerScaleSetMessage{
+		MessageID:  2,
+		Statistics: &scaleset.RunnerScaleSetStatistic{},
+		JobCompletedMessages: []*scaleset.JobCompleted{
+			{RunnerName: first, Result: "succeeded", JobMessageBase: scaleset.JobMessageBase{JobID: "j1"}},
+		},
+	}
+	if err := s.Scale(ctx, done); err != nil {
 		t.Fatal(err)
 	}
 	// The first worker remains blocked in its exit path. The next assigned job
@@ -453,7 +468,7 @@ func TestCompletedRunnerHandsCapacityToNextAssignedJob(t *testing.T) {
 	}
 	nextCtx, nextCancel := context.WithTimeout(ctx, time.Second)
 	defer nextCancel()
-	if _, err := s.HandleDesiredRunnerCount(nextCtx, 1); err != nil {
+	if err := s.Scale(nextCtx, assigned(1)); err != nil {
 		t.Fatal(err)
 	}
 	select {
