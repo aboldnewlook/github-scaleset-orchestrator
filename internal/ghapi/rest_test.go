@@ -103,3 +103,27 @@ func TestRESTErrorsNeverContainTheToken(t *testing.T) {
 		t.Fatalf("error = %v, want the status and GitHub's message", err)
 	}
 }
+
+func TestRepoFailsClosedOnIncompleteOrMismatchedResponse(t *testing.T) {
+	tests := map[string]string{
+		"empty object":      `{}`,
+		"no visibility":     `{"full_name":"jrschumacher/prune","private":false}`,
+		"mismatched name":   `{"full_name":"other/prune","private":false,"visibility":"public"}`,
+		"missing full_name": `{"private":false,"visibility":"public"}`,
+	}
+	for name, body := range tests {
+		t.Run(name, func(t *testing.T) {
+			r := restServer(t, map[string]route{"GET /repos/jrschumacher/prune": {200, body}})
+			if info, err := r.Repo(context.Background()); err == nil {
+				t.Fatalf("Repo() = %+v, nil; want an error", info)
+			}
+		})
+	}
+	// Case differences are not a mismatch.
+	r := restServer(t, map[string]route{
+		"GET /repos/jrschumacher/prune": {200, `{"full_name":"JRSchumacher/Prune","private":true,"visibility":"private"}`},
+	})
+	if _, err := r.Repo(context.Background()); err != nil {
+		t.Fatalf("case-different full_name: %v", err)
+	}
+}

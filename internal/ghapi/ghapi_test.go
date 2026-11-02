@@ -2,6 +2,7 @@ package ghapi
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -68,5 +69,15 @@ func TestFactoryResolvesThePerRepoToken(t *testing.T) {
 		if _, err := factory(context.Background(), config.Repo{Name: bad}); err == nil {
 			t.Errorf("factory accepted repo %q", bad)
 		}
+	}
+}
+
+func TestNewHTTPClientRequiresTLS13WithoutMutatingTheSDKDefault(t *testing.T) {
+	tr := NewHTTPClient().Transport.(*http.Transport)
+	if tr.TLSClientConfig == nil || tr.TLSClientConfig.MinVersion != tls.VersionTLS13 {
+		t.Fatalf("TLSClientConfig = %+v, want MinVersion TLS 1.3", tr.TLSClientConfig)
+	}
+	if def := scaleset.DefaultTransport(); def.TLSClientConfig != nil && def.TLSClientConfig.MinVersion == tls.VersionTLS13 {
+		t.Fatal("scaleset.DefaultTransport() was mutated")
 	}
 }

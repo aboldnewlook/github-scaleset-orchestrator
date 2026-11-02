@@ -1,6 +1,7 @@
 package ghapi
 
 import (
+	"crypto/tls"
 	"errors"
 	"net/http"
 	"time"
@@ -20,6 +21,13 @@ const (
 // §5.3). Each GetMessage poll is bounded by scaleset.MessagePollTimeout.
 func NewHTTPClient() *http.Client {
 	t := scaleset.DefaultTransport()
+	// Every client config requires TLS 1.3; clone so nothing shared is mutated.
+	if t.TLSClientConfig == nil {
+		t.TLSClientConfig = &tls.Config{}
+	} else {
+		t.TLSClientConfig = t.TLSClientConfig.Clone()
+	}
+	t.TLSClientConfig.MinVersion = tls.VersionTLS13
 	t.HTTP2 = &http.HTTP2Config{
 		SendPingTimeout: http2SendPingTimeout,
 		PingTimeout:     http2PingTimeout,

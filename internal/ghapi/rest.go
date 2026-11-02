@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 )
 
 const defaultAPIBase = "https://api.github.com"
@@ -30,6 +31,14 @@ func (r *restClient) Repo(ctx context.Context) (RepoInfo, error) {
 	}
 	if err := r.do(ctx, http.MethodGet, "/repos/"+r.repo, http.StatusOK, &out); err != nil {
 		return RepoInfo{}, err
+	}
+	// Visibility gates the public-repo policy, so an incomplete or
+	// mismatched answer (e.g. a followed transfer redirect) fails closed.
+	if out.Visibility == "" {
+		return RepoInfo{}, fmt.Errorf("GET /repos/%s: response has no visibility", r.repo)
+	}
+	if !strings.EqualFold(out.FullName, r.repo) {
+		return RepoInfo{}, fmt.Errorf("GET /repos/%s: response is for %q", r.repo, out.FullName)
 	}
 	return RepoInfo{FullName: out.FullName, Private: out.Private, Visibility: out.Visibility}, nil
 }
