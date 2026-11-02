@@ -159,16 +159,11 @@ func (f *Fleet) verifyAdoptions(ctx context.Context, m *member, s adoptionSnapsh
 	var adopted []*Reservation
 	var rejected []string
 	for _, rs := range candidates {
-		if s.room == 0 {
-			rejected = append(rejected, rs.GetRunnerName())
-			continue
-		}
-		r, ok := f.verifyAdoption(ctx, m, s, rs)
+		r, ok := f.verifyAdoption(ctx, m, &s, rs)
 		if !ok {
 			rejected = append(rejected, rs.GetRunnerName())
 			continue
 		}
-		s.room--
 		adopted = append(adopted, r)
 	}
 	return adopted, rejected
@@ -177,7 +172,12 @@ func (f *Fleet) verifyAdoptions(ctx context.Context, m *member, s adoptionSnapsh
 // verifyAdoption applies spec §4.3 "Binding": the runner name carries this
 // worker's segment, its class and repo are inside the worker's bounds, and
 // GitHub confirms it exists in that repo's scale set for the class.
-func (f *Fleet) verifyAdoption(ctx context.Context, m *member, s adoptionSnapshot, rs *workerv1.RunnerState) (*Reservation, bool) {
+//
+// GitHub is asked only about plausible candidates (every local check passed,
+// the repo has a scale set for the class), and at most s.room times: each
+// lookup consumes a slot of room whether or not it succeeds, so a worker
+// cannot make the router fan out GitHub calls.
+func (f *Fleet) verifyAdoption(ctx context.Context, m *member, s *adoptionSnapshot, rs *workerv1.RunnerState) (*Reservation, bool) {
 	if f.o.GitHub == nil || f.o.Adopter == nil {
 		return nil, false
 	}
@@ -189,11 +189,13 @@ func (f *Fleet) verifyAdoption(ctx context.Context, m *member, s adoptionSnapsho
 	if err != nil || !s.classes[class] || !repoAllowed(s.bounds.Repos, repo) {
 		return nil, false
 	}
-	ref, err := f.o.GitHub.GetRunnerByName(ctx, repo, name)
-	if err != nil || ref == nil {
+	scaleSetID, ok := f.o.GitHub.ScaleSetID(repo, class)
+	if !ok || s.room <= 0 {
 		return nil, false
 	}
-	if id, ok := f.o.GitHub.ScaleSetID(repo, class); !ok || ref.ScaleSetID != id {
+	s.room--
+	ref, err := f.o.GitHub.GetRunnerByName(ctx, repo, name)
+	if err != nil || ref == nil || ref.ScaleSetID != scaleSetID {
 		return nil, false
 	}
 	r := newReservation(f, m, name, PlacementRequest{Repo: repo, Class: class})

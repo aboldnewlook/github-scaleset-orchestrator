@@ -151,6 +151,22 @@ type Fleet struct {
 
 const directiveBuffer = 64
 
+// fillTiming replaces every non-positive field of t with its default, so a
+// partially set Timing can never leave a zero (or negative) timer.
+func fillTiming(t Timing) Timing {
+	d := DefaultTiming()
+	for _, p := range []struct{ got, def *time.Duration }{
+		{&t.Heartbeat, &d.Heartbeat}, {&t.Lost, &d.Lost}, {&t.Keepalive, &d.Keepalive}, {&t.OfferTTL, &d.OfferTTL},
+		{&t.StartTTL, &d.StartTTL}, {&t.Grace, &d.Grace}, {&t.LostUnstartedRemove, &d.LostUnstartedRemove},
+		{&t.LostStartedCap, &d.LostStartedCap}, {&t.Tick, &d.Tick},
+	} {
+		if *p.got <= 0 {
+			*p.got = *p.def
+		}
+	}
+	return t
+}
+
 // New returns an empty fleet.
 func New(o Options) *Fleet {
 	if o.Logger == nil {
@@ -159,12 +175,7 @@ func New(o Options) *Fleet {
 	if o.Now == nil {
 		o.Now = time.Now
 	}
-	if o.Timing == (Timing{}) {
-		o.Timing = DefaultTiming()
-	}
-	if o.Timing.Tick <= 0 {
-		o.Timing.Tick = time.Second
-	}
+	o.Timing = fillTiming(o.Timing)
 	if o.MaxSlotsPerWorker <= 0 {
 		o.MaxSlotsPerWorker = 16
 	}
