@@ -341,3 +341,17 @@ func TestQueueRejectsForgedTokenAndLogsNoSecrets(t *testing.T) {
 		}
 	}
 }
+
+func TestRunnerRegistrationRejectsMalformedURL(t *testing.T) {
+	m, _ := newTestModel(t)
+	srv := httptest.NewServer(NewServer(m, nil))
+	defer srv.Close()
+	for _, bad := range []string{"http://[::1", "%zz", "http://h/onlyowner", ""} {
+		if code := postJSON(t, srv.URL+"/api/v3/actions/runner-registration", map[string]string{"url": bad}, nil); code != http.StatusBadRequest {
+			t.Fatalf("url %q: status %d, want 400", bad, code)
+		}
+	}
+	if code := doJSON(t, http.MethodGet, srv.URL+"/healthz", nil); code != http.StatusOK {
+		t.Fatalf("server stopped serving: %d", code)
+	}
+}

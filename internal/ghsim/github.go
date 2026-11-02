@@ -145,10 +145,15 @@ func (s *server) runnerRegistration(w http.ResponseWriter, r *http.Request) {
 	if !readJSON(w, r, &req) {
 		return
 	}
+	const badURL = "url must point at a repository: <sim>/owner/name"
 	u, err := url.Parse(req.URL)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"message": badURL})
+		return
+	}
 	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
-	if err != nil || len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"message": "url must point at a repository: <sim>/owner/name"})
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"message": badURL})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"url": serviceBase(r, parts[0], parts[1]), "token": s.adminJWT()})
