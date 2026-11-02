@@ -295,6 +295,45 @@ At startup, the manager force-removes leftover containers labeled with its `inst
 
 See [docs/unraid-portainer.md](docs/unraid-portainer.md) for a complete deployment guide using Portainer stacks.
 
+## Remote Workers
+
+A gso router can place jobs on other machines on the same network. The router keeps the PATs and the GitHub scale sets. Each worker holds only a per-worker credential and runs the jobs it accepts in sibling Docker containers. The design is in `docs/design/remote-workers.md`.
+
+**1. Open the worker listener on the router.**
+
+```yaml
+max_runners: 0                # the router runs no jobs itself (needs workers.listen)
+runner:
+  instance_id: unraid         # stable identity: scale-set names, session owner
+workers:
+  listen: ":9200"
+  advertise: "unraid.lan:9200"   # the address workers dial; required for join strings
+  allow_cidrs: [192.168.1.0/24]  # default: private ranges only
+```
+
+**2. Add a worker on the router.** This works on the router's local control socket only, never with `--remote`:
+
+```bash
+gso workers add mac-m1 --classes linux-arm64 --slots 4
+```
+
+It prints a single-use join string (`gso-join:v1:...`), valid for 15 minutes.
+
+**3. Start the worker** on the other machine:
+
+```bash
+gso worker --join 'gso-join:v1:...' --executor docker --slots 2 \
+  --image ghcr.io/aboldnewlook/github-scaleset-orchestrator:<tag>
+```
+
+The worker shows the router's address and short key and asks to confirm (skipped with `--yes`, or when there is no terminal, as in a container with `GSO_WORKER_JOIN` set). After enrollment the credential and the router's pinned key live in `--state-dir` (default `<config dir>/gso/worker`); the join string is no longer needed. Use `--credential-store keychain` on a desktop to keep the credential in the OS keychain.
+
+Settings can come from the environment: `GSO_WORKER_JOIN`, `GSO_WORKER_ROUTER`, `GSO_WORKER_NAME`, `GSO_WORKER_IMAGE`, `GSO_WORKER_DOCKER_HOST`, `GSO_WORKER_SLOTS`, `GSO_WORKER_ACCEPT_PUBLIC`. Flags win over the environment.
+
+`--allow owner/*` limits which repositories the worker runs (default: the owners granted at enrollment). `--accept-public follow|accept|refuse` controls public repositories.
+
+Stopping the worker (Ctrl-C, SIGTERM) closes its session but leaves running job containers alone; the next start re-attaches to them.
+
 ## How It Works
 
 ### Scale Set API
