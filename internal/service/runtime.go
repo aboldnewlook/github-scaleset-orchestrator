@@ -43,6 +43,9 @@ func NewRuntime(orch OrchestratorState, cancelFunc context.CancelFunc, logger *s
 
 // HandleRequest dispatches a control request to the appropriate method.
 func (r *Runtime) HandleRequest(ctx context.Context, req control.Request) control.Response {
+	if isWorkersMethod(req.Method) {
+		return r.handleWorkers(ctx, req)
+	}
 	switch req.Method {
 	case control.MethodLiveStatus:
 		result, err := r.LiveStatus(ctx)
@@ -108,11 +111,15 @@ func (r *Runtime) LiveStatus(ctx context.Context) (*control.LiveStatusResult, er
 		})
 	}
 
-	return &control.LiveStatusResult{
+	result := &control.LiveStatusResult{
 		Repos:      repos,
 		MaxRunners: r.orch.MaxRunners(),
 		Available:  r.orch.AvailableSlots(),
-	}, nil
+	}
+	if admin, ok := r.orch.(WorkerAdmin); ok {
+		result.Workers = admin.ListWorkers()
+	}
+	return result, nil
 }
 
 // LiveEvents returns events since the given timestamp from the event store.
@@ -151,8 +158,8 @@ func (r *Runtime) RecycleRunner(ctx context.Context, name string) error {
 
 // SetMaxRunners updates the maximum number of concurrent runners.
 func (r *Runtime) SetMaxRunners(count int) error {
-	if count < 1 {
-		return fmt.Errorf("max_runners must be at least 1")
+	if count < 0 {
+		return fmt.Errorf("max_runners cannot be negative")
 	}
 	if err := r.orch.SetMaxRunners(count); err != nil {
 		return fmt.Errorf("setting max runners: %w", err)

@@ -317,6 +317,6 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn, requireAuth bool
 	}
 
 	s.logger.Info("control request", "remote", conn.RemoteAddr(), "method", req.Method)
-	resp := s.handler.HandleRequest(ctx, req)
+	resp := s.handler.HandleRequest(WithTransport(ctx, !requireAuth), req)
 	enc.Encode(resp) //nolint:errcheck
 }

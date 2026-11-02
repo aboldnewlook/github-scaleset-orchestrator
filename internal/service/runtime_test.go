@@ -141,7 +141,7 @@ func TestRuntimeSetMaxRunners(t *testing.T) {
 	}{
 		{name: "valid count", count: 8},
 		{name: "minimum count", count: 1},
-		{name: "zero count", count: 0, wantErr: true},
+		{name: "zero count is the router's decision", count: 0},
 		{name: "negative count", count: -1, wantErr: true},
 	}
 
