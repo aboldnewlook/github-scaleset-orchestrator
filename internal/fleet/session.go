@@ -3,6 +3,7 @@ package fleet
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	workerv1 "github.com/aboldnewlook/github-scaleset-orchestrator/gen/gso/worker/v1"
@@ -181,7 +182,7 @@ func (f *Fleet) verifyAdoption(ctx context.Context, m *member, s adoptionSnapsho
 		return nil, false
 	}
 	name, repo := rs.GetRunnerName(), rs.GetRepo()
-	if seg, ok := naming.RunnerWorkerSegment(name); !ok || seg != s.segment {
+	if seg, ok := naming.RunnerWorkerSegment(name); !ok || seg != s.segment || !hasRunnerSuffix(name) {
 		return nil, false
 	}
 	class, err := ClassFromProto(rs.GetClass())
@@ -203,6 +204,22 @@ func (f *Fleet) verifyAdoption(ctx context.Context, m *member, s adoptionSnapsho
 		r.phase, r.acceptedAt = phaseAccepted, f.o.Now()
 	}
 	return r, true
+}
+
+// hasRunnerSuffix reports whether the name ends in the 6-character [a-z0-9]
+// suffix naming.RunnerName appends. Legacy scaler names (gso-<repo>-<uuid8>)
+// carry 8 hex characters and are never adoptable by a worker.
+func hasRunnerSuffix(name string) bool {
+	i := strings.LastIndex(name, "-")
+	if i < 0 || len(name)-i-1 != 6 {
+		return false
+	}
+	for _, c := range name[i+1:] {
+		if (c < 'a' || c > 'z') && (c < '0' || c > '9') {
+			return false
+		}
+	}
+	return true
 }
 
 // Directives returns the session's directive stream; it is closed when the
@@ -317,7 +334,14 @@ func (f *Fleet) ReportRunner(_ context.Context, sessionID, workerID string, rep 
 	}
 	r := m.busy[rep.GetRunnerName()]
 	if r == nil {
-		return ErrNotPermitted
+		// Already released (e.g. JobCompleted won the race): idempotent. Only a
+		// runner currently held by another member is a foreign report.
+		for _, other := range f.membersLocked() {
+			if other != m && other.busy[rep.GetRunnerName()] != nil {
+				return ErrNotPermitted
+			}
+		}
+		return nil
 	}
 	switch rep.GetPhase() {
 	case workerv1.RunnerPhase_RUNNER_PHASE_RUNNING:

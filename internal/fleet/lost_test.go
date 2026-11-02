@@ -289,3 +289,49 @@ func TestAdoptionIsKeyedByOwnerAndRepo(t *testing.T) {
 		t.Fatalf("adopted = %d, want 2", len(tf.adopter.list()))
 	}
 }
+
+// I-1: a report for a runner that was already released (JobCompleted won the
+// race) is idempotent; only a runner held by another member is foreign.
+func TestReportRunnerIsIdempotentAfterRelease(t *testing.T) {
+	tf := newTestFleet(t)
+	a, aSid, aCh := openBox(t, tf, "aaa", 1, linuxX64)
+	b, bSid, _ := openBox(t, tf, "bbb", 1, linuxX64)
+	r, errc := tf.place(t, aSid, a.ID, aCh, PlacementRequest{Repo: "o/r", Class: linuxX64}, &mintRecorder{})
+	err := tf.ReportRunner(context.Background(), bSid, b.ID, &workerv1.ReportRunnerRequest{SessionId: bSid, RunnerName: r.RunnerName(), Phase: exited})
+	if !errors.Is(err, ErrNotPermitted) {
+		t.Fatalf("foreign report of a busy runner = %v, want ErrNotPermitted", err)
+	}
+	r.Release()
+	if err := waitErr(t, errc); err != nil {
+		t.Fatalf("Run = %v", err)
+	}
+	tf.report(t, aSid, a.ID, r.RunnerName(), exited, 0, "") // after Release
+	tf.report(t, aSid, a.ID, r.RunnerName(), exited, 0, "") // duplicate
+	tf.report(t, aSid, a.ID, "gso-aaa-r-zzzzzz", running, 0, "")
+}
+
+// I-2: legacy scaler names (gso-<repo>-<uuid8>) are never adoptable, even by
+// an enrolled worker whose segment equals the repo short name.
+func TestAdoptionRefusesLegacyNamesForMatchingSegment(t *testing.T) {
+	tf := newTestFleet(t)
+	tf.gh.setScaleSet("o/prune", linuxX64, 7)
+	tf.gh.addRunner("o/prune", "gso-prune-abcd1234", 1, 7)
+	w := testWorker("prune", Bounds{Classes: []runner.Class{linuxX64}, MaxSlots: 2})
+	res := tf.open(t, w, dockerCaps(2, linuxX64), runningState("gso-prune-abcd1234", "o/prune", linuxX64, running))
+	if !reflect.DeepEqual(res.RejectedRunners, []string{"gso-prune-abcd1234"}) || len(tf.adopter.list()) != 0 {
+		t.Fatalf("rejected=%v adopted=%d", res.RejectedRunners, len(tf.adopter.list()))
+	}
+}
+
+// I-3: one enrolled worker may not adopt a runner named for another enrolled worker.
+func TestAdoptionRefusesAnotherEnrolledWorkersSegment(t *testing.T) {
+	tf := newTestFleet(t)
+	tf.gh.setScaleSet("o/r", linuxX64, 7)
+	tf.gh.addRunner("o/r", "gso-aaa-r-abc123", 1, 7)
+	tf.open(t, testWorker("aaa", Bounds{Classes: []runner.Class{linuxX64}, MaxSlots: 1}), dockerCaps(1, linuxX64))
+	b := testWorker("bbb", Bounds{Classes: []runner.Class{linuxX64}, MaxSlots: 1})
+	res := tf.open(t, b, dockerCaps(1, linuxX64), runningState("gso-aaa-r-abc123", "o/r", linuxX64, running))
+	if !reflect.DeepEqual(res.RejectedRunners, []string{"gso-aaa-r-abc123"}) || len(tf.adopter.list()) != 0 {
+		t.Fatalf("rejected=%v adopted=%d", res.RejectedRunners, len(tf.adopter.list()))
+	}
+}
