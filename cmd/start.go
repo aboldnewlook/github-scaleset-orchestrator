@@ -13,7 +13,7 @@ import (
 	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/config"
 	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/control"
 	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/event"
-	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/orchestrator"
+	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/router"
 	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/service"
 	"github.com/spf13/cobra"
 )
@@ -69,10 +69,13 @@ func runStart(cmd *cobra.Command, args []string) error {
 	store := event.NewFileStore(filepath.Join(eventsDir, "events.jsonl"))
 	bus := event.NewBus(store)
 
-	orch := orchestrator.New(cfg, logger, bus)
+	rt, err := router.New(cfg, logger, bus, router.Options{})
+	if err != nil {
+		return fmt.Errorf("creating router: %w", err)
+	}
 
 	// Control socket server
-	runtime := service.NewRuntime(orch, cancel, logger, store)
+	runtime := service.NewRuntime(rt, cancel, logger, store)
 	socketPath := control.SocketPath()
 
 	var serverOpts []control.ServerOption
@@ -121,7 +124,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 	}()
 	defer func() { _ = ctrlServer.Stop() }()
 
-	if err := orch.Run(ctx); err != nil {
+	if err := rt.Run(ctx); err != nil {
 		if ctx.Err() != nil {
 			logger.Info("shutting down gracefully")
 			return nil
