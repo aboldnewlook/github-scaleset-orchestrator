@@ -106,3 +106,37 @@ The simulator serves two APIs from one port:
   shapes `gso`'s REST calls read (`full_name`, `private`, `visibility`).
 
 Repository names are matched ASCII case-insensitively, as on GitHub.
+
+## Fake runners
+
+A simulator JIT config looks like a real one (it passes the worker's checks:
+host `github.com`, the offered repository, the local allowlist) but carries
+the simulator's URL and a `gsoSim` marker. What runs it:
+
+- **Docker workers** (the Unraid worker container, Burst, `gso worker
+  --executor docker --image <gso image>`): the job image's
+  `/usr/local/bin/gso-job` checks `gso sim is-sim-jit` first and runs
+  `gso sim runner` instead of the actions runner. The container is created,
+  attached to, re-attached after a worker restart and removed exactly as for a
+  real job. The job image must be a gso image built from this branch, and the
+  container must reach the simulator's `--advertise` URL. A docker worker needs
+  the simulator host in its trusted hosts too: pass `--github-sim <url>`.
+- **`gso worker --executor sim --github-sim <url>`**: runs `gso sim runner` as
+  a local process in its own process group, so it survives a worker restart;
+  the restarted worker re-attaches by PID. It needs no `--image`. Unix only;
+  meant for tests and quick local runs.
+
+`--github-sim` (or `GSO_GITHUB_SIM`) on `gso worker` puts both `github.com`
+and the simulator's host into the worker's trusted hosts, as described under
+"Worker trust settings". `gso start --github-sim <url>` points the router at
+the same simulator.
+
+`gso sim runner` claims a job, works for the job's `--duration`, checks for
+cancellation about once a second, and reports the result. If its runner is
+removed before a job arrives it exits 0, like an ephemeral runner that was
+deregistered. Its HTTP timeout (one minute) deliberately exceeds the
+simulator's 25 s (scaled) claim long-poll.
+
+`GSO_TIMING_SCALE` (a float in (0, 1]) shortens every gso timer: heartbeats,
+lost-worker detection, backoffs, the simulator's poll wait and session TTL.
+It is for tests only. Never set it in production.

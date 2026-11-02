@@ -81,7 +81,7 @@ type server struct {
 // NewRemoteFactory calls), the runner API (what fake runners call) and the
 // admin API (job injection). It has no authentication; never expose it.
 func NewServer(m *Model, logger *slog.Logger) http.Handler {
-	return newServer(m, logger, timing.Scale(25*time.Second))
+	return newServer(m, logger, timing.Scale(defaultClaimWait))
 }
 
 func newServer(m *Model, logger *slog.Logger, claimWait time.Duration) http.Handler {

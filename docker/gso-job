@@ -6,6 +6,13 @@ if [ -z "${ACTIONS_RUNNER_INPUT_JITCONFIG:-}" ]; then
   exit 1
 fi
 
+# A JIT config minted by the gso GitHub simulator runs the fake runner instead
+# of the actions runner, so container lifecycle is exercised without
+# github.com (docs/simulator.md). The job image is the gso image.
+if gso sim is-sim-jit 2>/dev/null; then
+  exec gso sim runner
+fi
+
 runner_dir=$(find /opt/gso-runner -mindepth 1 -maxdepth 1 -type d -name 'runner-*' | head -n 1)
 if [ -z "$runner_dir" ]; then
   echo "runner binaries are missing from the job image" >&2

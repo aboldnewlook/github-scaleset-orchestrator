@@ -28,7 +28,7 @@ import (
 
 // workerFlags holds the raw `gso worker` flag values.
 type workerFlags struct {
-	join, router, name, stateDir, executor, image, dockerHost, acceptPublic, credentialStore string
+	join, router, name, stateDir, executor, image, dockerHost, acceptPublic, credentialStore, githubSim string
 
 	slots        int
 	memoryMB     int64
@@ -85,7 +85,8 @@ func init() {
 	f.StringVar(&wf.router, "router", "", "dial the router at host:port instead of the join string's address (env GSO_WORKER_ROUTER); the pinned key still applies")
 	f.StringVar(&wf.name, "name", "", "worker name (env GSO_WORKER_NAME; default: this host's name)")
 	f.StringVar(&wf.stateDir, "state-dir", "", "directory for the credential, enrollment state and runner records (default: <config dir>/gso/worker)")
-	f.StringVar(&wf.executor, "executor", "docker", "executor for Linux classes: docker (native arrives in P5)")
+	f.StringVar(&wf.executor, "executor", "docker", "executor: docker, or sim (testing: runs the simulator's fake runner as a process)")
+	f.StringVar(&wf.githubSim, "github-sim", "", "URL of the gso GitHub simulator the router uses (env GSO_GITHUB_SIM; testing only): its host is trusted in job configs next to github.com")
 	f.IntVar(&wf.slots, "slots", 1, "jobs to run at once (env GSO_WORKER_SLOTS); the router clamps this to the enrolled bounds")
 	f.StringVar(&wf.image, "image", "", "job image for docker runners (env GSO_WORKER_IMAGE), e.g. ghcr.io/aboldnewlook/github-scaleset-orchestrator:<tag>")
 	f.StringVar(&wf.dockerHost, "docker-host", "", "docker engine endpoint (env GSO_WORKER_DOCKER_HOST; default unix:///var/run/docker.sock)")
@@ -111,6 +112,7 @@ func resolveWorkerSettings(f workerFlags, changed func(string) bool, getenv func
 		}
 		return strings.TrimSpace(value)
 	}
+	backoffMin, backoffMax := workerBackoff()
 	s := workerSettings{
 		Join:            str("join", "GSO_WORKER_JOIN", f.join),
 		Router:          str("router", "GSO_WORKER_ROUTER", f.router),
@@ -123,8 +125,8 @@ func resolveWorkerSettings(f workerFlags, changed func(string) bool, getenv func
 		CPUs:            f.cpus,
 		CredentialStore: f.credentialStore,
 		Yes:             f.yes,
-		BackoffMin:      time.Second,
-		BackoffMax:      15 * time.Second,
+		BackoffMin:      backoffMin,
+		BackoffMax:      backoffMax,
 	}
 	for _, a := range f.allow {
 		if a = strings.TrimSpace(a); a != "" {
@@ -136,6 +138,7 @@ func resolveWorkerSettings(f workerFlags, changed func(string) bool, getenv func
 			s.TrustedHosts = append(s.TrustedHosts, h)
 		}
 	}
+	simURL := str("github-sim", "GSO_GITHUB_SIM", f.githubSim)
 	if !changed("slots") {
 		if v := strings.TrimSpace(getenv("GSO_WORKER_SLOTS")); v != "" {
 			n, err := strconv.Atoi(v)
@@ -165,11 +168,21 @@ func resolveWorkerSettings(f workerFlags, changed func(string) bool, getenv func
 			return workerSettings{}, errors.New("--image (GSO_WORKER_IMAGE) is required for the docker executor, e.g. ghcr.io/aboldnewlook/github-scaleset-orchestrator:<tag>")
 		}
 		s.Executor, s.NewLauncher = runner.ExecutorDocker, newDockerLauncher
+	case "sim":
+		if simURL == "" && len(s.TrustedHosts) == 0 {
+			return workerSettings{}, errors.New("--executor sim needs --github-sim (GSO_GITHUB_SIM) or --trusted-host, so the worker accepts the simulator's job configs")
+		}
+		s.Executor, s.NewLauncher = runner.ExecutorDocker, newSimLauncher
 	case "native":
 		return workerSettings{}, errors.New("--executor native arrives in P5; use --executor docker")
 	default:
-		return workerSettings{}, fmt.Errorf("unknown --executor %q; use docker", f.executor)
+		return workerSettings{}, fmt.Errorf("unknown --executor %q; use docker or sim", f.executor)
 	}
+	trusted, err := simTrustedHosts(simURL, strings.EqualFold(strings.TrimSpace(f.executor), "sim"), s.TrustedHosts)
+	if err != nil {
+		return workerSettings{}, err
+	}
+	s.TrustedHosts = trusted
 
 	if s.Name == "" {
 		host, err := hostname()
@@ -187,6 +200,11 @@ func resolveWorkerSettings(f workerFlags, changed func(string) bool, getenv func
 		s.StateDir = filepath.Join(dir, "worker")
 	}
 	return s, nil
+}
+
+// newSimLauncher runs jobs as `gso sim runner` processes (testing).
+func newSimLauncher(s workerSettings, _ *slog.Logger) (worker.Launcher, error) {
+	return simLauncher(s.StateDir)
 }
 
 // newDockerLauncher runs jobs as sibling containers that survive the worker's

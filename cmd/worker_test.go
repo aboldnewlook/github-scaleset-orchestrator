@@ -102,7 +102,7 @@ func TestResolveWorkerSettingsErrors(t *testing.T) {
 		wantErr string
 	}{
 		{"native executor", func(f *workerFlags) { f.executor = "native" }, nil, "P5"},
-		{"unknown executor", func(f *workerFlags) { f.executor = "sim" }, nil, "unknown --executor"},
+		{"unknown executor", func(f *workerFlags) { f.executor = "bogus" }, nil, "unknown --executor"},
 		{"missing image", func(f *workerFlags) { f.image = "" }, nil, "--image"},
 		{"zero slots", func(f *workerFlags) { f.slots = 0 }, nil, "--slots"},
 		{"bad slots env", func(*workerFlags) {}, map[string]string{"GSO_WORKER_SLOTS": "two"}, "GSO_WORKER_SLOTS"},
