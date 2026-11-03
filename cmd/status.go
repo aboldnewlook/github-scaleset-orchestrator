@@ -68,7 +68,20 @@ func printLiveStatus(live *control.LiveStatusResult) error {
 			fmt.Sprintf("%d", len(r.Runners)),
 		})
 	}
-	return printTable(headers, rows)
+	if err := printTable(headers, rows); err != nil {
+		return err
+	}
+	if len(live.Listeners) == 0 {
+		return nil
+	}
+	fmt.Println()
+	listenerRows := make([][]string, 0, len(live.Listeners))
+	for _, l := range live.Listeners {
+		listenerRows = append(listenerRows, []string{
+			l.Repo, l.Class, l.ScaleSetName, l.State, fmt.Sprintf("%d", l.Failures), l.LastError,
+		})
+	}
+	return printTable([]string{"REPO", "CLASS", "SCALE SET", "STATE", "FAILURES", "LAST ERROR"}, listenerRows)
 }
 
 func printAPIStatus(status *service.StatusResult) error {

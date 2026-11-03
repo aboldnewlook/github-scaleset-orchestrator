@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"os"
+	"reflect"
 	"sync/atomic"
 	"testing"
 
@@ -20,6 +21,11 @@ type mockOrchState struct {
 	cancelled    []string
 	setMaxCalled int
 	lastMaxCount int
+	listeners    []control.ListenerLiveStatus
+}
+
+func (m *mockOrchState) Listeners() []control.ListenerLiveStatus {
+	return m.listeners
 }
 
 func (m *mockOrchState) RunnersByRepo() map[string][]string {
@@ -55,6 +61,22 @@ func (m *mockOrchState) CancelRunner(name string) bool {
 
 func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+}
+
+func TestRuntimeLiveStatusIncludesListeners(t *testing.T) {
+	want := []control.ListenerLiveStatus{{
+		Repo: "org/repo", Class: "linux-x64", ScaleSetID: 7, ScaleSetName: "gso-unraid-repo-linux-x64",
+		State: "degraded", Failures: 3, LastError: "github: 502",
+	}}
+	orch := &mockOrchState{runners: map[string][]string{}, listeners: want}
+	rt := service.NewRuntime(orch, func() {}, testLogger())
+	got, err := rt.LiveStatus(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got.Listeners, want) {
+		t.Fatalf("Listeners = %+v, want %+v", got.Listeners, want)
+	}
 }
 
 func TestRuntimeLiveStatus(t *testing.T) {
