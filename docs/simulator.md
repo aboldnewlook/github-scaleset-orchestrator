@@ -54,10 +54,12 @@ the runner (or Docker) to be available as for a real router.
 ## Running it on Unraid
 
 Start the compose stack's `sim` profile (see docs/unraid-portainer.md, "Dry run
-with the simulator"). Publish port 9300 and pass
-`--advertise http://<unraid LAN address>:9300`: job containers run on Docker's
-default bridge, so they reach the simulator through the published port on the
-LAN address, not through the compose service name.
+with the simulator"). The `gso-sim` service runs on the host network and listens
+only on the Docker bridge gateway, `--listen 172.17.0.1:9300 --advertise
+http://172.17.0.1:9300`. Job containers run on Docker's default bridge, so they
+cannot use the compose service name; the router, the worker and the job
+containers all use that one address. Never listen on `0.0.0.0`: the simulator
+has no authentication.
 
 ## Injecting jobs
 

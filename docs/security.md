@@ -112,6 +112,31 @@ Runners are configured with `DisableUpdate: true` and are JIT-only. They:
 
 A runner cannot be reused for a second job. In Docker mode the job container is removed; optional repository caches persist by design. In subprocess mode, workflow writes outside the temporary workspace can persist.
 
+## Remote Workers
+
+A router (`gso start` with `workers.listen`) places jobs on enrolled workers (`gso worker`, or the Burst desktop app). The router keeps the tokens. A worker receives a single-use JIT config for each job it accepts.
+
+- **Enrolling a machine trusts it with the secrets of every job it runs.** A worker sees each job's code and the secrets that job's workflow receives. Enroll only machines you would let run that code.
+- **Bounds.** `gso workers add <name> --classes … --slots … [--repos …]` fixes what a credential may do. The router clamps everything the worker advertises to those bounds and accepts only one live session per credential. A second connection is refused and raises an `alert` event.
+- **Router compromise is bounded by the workers.** Before launching anything, a worker decodes the JIT config and refuses it unless the host is `github.com`, the repository equals the offered one, and the repository matches the worker's **local** allowlist (seeded at enrollment, changed only on the worker). A compromised router can push work only to repositories each worker already allows.
+- **The OS keychain is not a same-user boundary.** macOS Keychain, Windows Credential Manager and the Linux Secret Service are readable by any process running as the same user. The credential is protected by keeping job code out of that user: Docker jobs run in containers without access to the host user's keychain or files.
+- **Docker isolation is process and filesystem isolation, not network isolation.** Job containers sit on Docker's default bridge and can reach your LAN: NAS shares, printers, admin UIs, and the router's ports (which are authenticated). That is accepted for private repositories you trust. Do not opt in public repositories on desktop workers.
+- **The join string is the root of trust.** It carries the router address, the key pin and the enrollment code. Move it over a channel you trust. The worker shows the address and a short pin before enrolling.
+
+### Public repositories
+
+Anyone can open a pull request against a public repository, so its workflow code is untrusted. The router therefore:
+
+- reads each repository's visibility (`GET /repos/{owner}/{repo}`) **before** creating its scale set, retrying on failure, and **does not start that repository's listener** while it cannot read it (fail closed). The token needs read access to the repository's metadata;
+- offers a public repository's jobs to a remote worker **only if that worker opted in** with `--accept-public accept`;
+- **forces the job cache off** for public jobs.
+
+The router's own local member (a router with `max_runners` above 0) currently accepts public repositories. Router-level `public.*` settings are not available yet. Opt in public repositories only on workers that are disposable or isolated from your LAN.
+
+### Simulator
+
+`gso sim serve` binds `:9300` on all interfaces and has **no authentication** and no TLS. Anything that can reach it can inject jobs and read what the router sends. Never expose it beyond a trusted network: bind it to loopback or one internal address only (the compose `sim` profile runs it on the host network, listening only on the Docker bridge gateway address). It is for testing; see [simulator.md](simulator.md).
+
 ## Network Model
 
 ### Outbound Only
@@ -125,7 +150,27 @@ gso makes outbound HTTPS connections only:
 | `github-releases.githubusercontent.com` | Runner binary download |
 | `pipelines.actions.githubusercontent.com` | Runner message session (long-poll) |
 
-No inbound ports are opened. No webhook endpoints are needed. The tool works behind NAT, firewalls, and home networks.
+Without remote workers, no inbound ports are opened and no webhook endpoints are needed. The tool works behind NAT, firewalls, and home networks. Remote workers need the same outbound access, because each runner talks to GitHub directly.
+
+### Inbound: the worker listener (remote workers only)
+
+Setting `workers.listen` (e.g. `:9200`) opens **one** inbound port. It carries the router-to-worker control plane only, never runner traffic.
+
+- **TLS 1.3 only.** Workers pin the listener's public key (SPKI SHA-256) from their join string. They ignore certificate dates and hostnames, so the pinned key at `<state>/workers/tls/key.pem` is the only trust anchor. It is generated once and never regenerated while it exists.
+- **Source allowlist.** `workers.allow_cidrs` defaults to private ranges only: RFC1918, `100.64.0.0/10` (CGNAT), `fc00::/7` and loopback. The check runs on the client's source address **before** the TLS handshake. Narrow it to your LAN plus, in a container deployment, the compose network. The listener also caps open connections at 256.
+- **Authentication.** Every call except `Enroll` carries a per-worker credential (`<worker_id>.<secret>`). The router stores only SHA-256 hashes. `Enroll` takes a single-use, 15-minute code, is rate-limited per source address (5/min, 30/h), and is the only call reachable before authentication.
+- **Administration stays local.** `gso workers add/update/list/drain/revoke` work only on the router's unix socket, never on the TCP control port. A leaked `GSO_CONTROL_TOKEN` cannot enroll a worker. In a container, run them with `docker exec <router> gso workers ...`.
+
+#### Docker published ports and the allowlist
+
+The allowlist is only as good as the source address the router sees. When Docker publishes a port through its **userland proxy** (`docker-proxy`), the router sees the proxy's connection, not the real client: every peer then appears to come from the Docker bridge gateway (an address in `172.16.0.0/12`, such as the compose network's gateway, e.g. `172.18.0.1`). Because the compose network range is normally allowed, **the allowlist then filters nothing**, and anyone who can reach the port passes it. The remaining defences (TLS pin, per-worker credential, enrollment rate limit) still hold, but you have lost the network layer.
+
+On the normal path, an `iptables` DNAT rule forwards the published port and the router sees the real client address. The proxy relays connections instead (and hides the client) on paths where DNAT does not apply, for example with Docker's `iptables` support turned off or on some loopback, hairpin and IPv6 paths. Whether your host is affected depends on its Docker configuration, so verify it rather than assume.
+
+- **Prefer the default iptables DNAT**, or give the router **host networking** (`network_mode: host`, then `workers.listen` binds on the host and sees real peers).
+- **Check it, positive.** Enroll a worker from a *different* machine on your LAN, then read the router log: the `worker enrolled` line carries `remote=<address>`, and that must be the machine's LAN address. If `remote` is the compose network's gateway (an address in `172.16.0.0/12`) for a peer that is not on the compose network, the source address is being hidden.
+- **Check it, negative.** From a host **outside** your allowlist (another VLAN, or a phone on mobile data), run `openssl s_client -connect <host>:9200 -tls1_3`. If the allowlist works, the connection is closed before the TLS handshake and `openssl` reports an error without a certificate. If it prints the router's certificate, the allowlist is not filtering.
+- If you cannot preserve source addresses, treat the port as unfiltered: restrict it with the host firewall (Unraid: do not forward it, bind it to the LAN interface) and rely on enrollment bounds and revocation.
 
 ### DNS
 
@@ -151,9 +196,22 @@ The orchestrator resolves DNS for the above hostnames. If you run in a restricte
 ### Docker-Specific
 
 1. **Run job containers as a non-root user.** The stock image uses the `runner` user.
-2. **Mount the Docker socket only into the manager in Docker mode.** The socket gives the manager host-level control; never pass it to jobs.
+2. **Mount the Docker socket only into the process that starts job containers**: the `gso worker` container in the split deployment, or the single gso container in the legacy one. Never mount it into the router or into jobs.
 3. **Keep job mounts limited.** Only a dedicated `/cache` mount is supported, and it should be disabled for untrusted PR workflows.
 4. **Use Docker secrets** (`file: /run/secrets/gh_token`) instead of environment variables for token storage.
+
+## Recommended Unraid Deployment
+
+Run the **router and a worker as two containers** ([unraid-portainer.md](unraid-portainer.md), `docker-compose.yaml`):
+
+| | `gso-router` | `gso-worker` |
+|---|---|---|
+| GitHub token | yes | **no** |
+| Docker socket (root-equivalent on the host) | **no** | yes |
+| Runs jobs | no (`max_runners: 0`) | yes, in sibling containers |
+| Inbound port | 9200 (workers), optionally 9100 (control) | none |
+
+The token and the Docker socket never share a container. A job that escapes its container reaches a host socket but no token. A compromised router holds the tokens but cannot start containers on the host. The single-container layout (socket plus token in one container) remains supported for rollback and for hosts without other workers.
 
 ## Comparison: Deployment Models
 
