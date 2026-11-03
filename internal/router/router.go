@@ -42,8 +42,9 @@ const (
 type Options struct {
 	// StateDir holds workers.json and workers/tls. "" = config.StateDir().
 	StateDir string
-	// GitHub replaces the real GitHub client factory (tests, simulator). It is
-	// stored and unused until B8a passes it to the orchestrator.
+	// GitHub replaces the real GitHub client factory (tests, simulator). The
+	// orchestrator cannot take one until A3b/B8a, so New refuses a non-nil
+	// value rather than silently using real GitHub.
 	GitHub ghapi.Factory
 	// FleetTiming overrides fleet.DefaultTiming().
 	FleetTiming *fleet.Timing
@@ -82,6 +83,12 @@ var (
 // New builds the router. With workers.listen set it loads (or creates) the
 // worker registry and the listener key, so the SPKI pin is known before Run.
 func New(cfg *config.Config, logger *slog.Logger, bus *event.Bus, o Options) (*Router, error) {
+	if o.GitHub != nil {
+		// The orchestrator cannot take a GitHub factory yet (A3b/B8a replace this
+		// check with the wiring). Starting anyway would drive real GitHub with
+		// the real token while the caller believes it is simulating.
+		return nil, errors.New("github simulator wiring requires orchestrator support (A3b); refusing to start against real GitHub")
+	}
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}

@@ -10,9 +10,13 @@ workflows. It is for testing only.
   one message session per scale set, message queues, JIT runner registration,
   repository visibility and workflow runs. It outlives router restarts, as
   GitHub does.
-- The router uses it instead of github.com when started with
+- The router is meant to use it instead of github.com when started with
   `gso start --github-sim http://<sim>:9300` (or `github_sim:` in the config,
-  or `GSO_GITHUB_SIM`). No token is needed.
+  or `GSO_GITHUB_SIM`), with no token. **Pending A3b:** the orchestrator cannot
+  yet take the simulator's client factory, so for now `gso start --github-sim`
+  refuses to start ("refusing to start against real GitHub") rather than run
+  against github.com. Until A3b lands, only the simulator, `gso sim` commands,
+  fake runners and workers can be exercised on their own.
 - Jobs are injected by hand with `gso sim job`. A worker that receives one runs
   a **fake runner** that claims the job from the simulator, "works" for the
   requested duration and reports it done (see "Fake runners" below).
@@ -88,7 +92,8 @@ worker verifies a JIT before launching it, and `OfferCheck.TrustedHosts`
 the worker's `TrustedHosts` must list **both** `github.com` and the simulator
 host (the host part of `--advertise`, for example `unraid.lan`). With only
 `github.com` the worker rejects the JIT; with only the simulator host it rejects
-real ones.
+real ones. `gitHubUrl` must stay `https` even then; only `serverUrl` may be
+plain `http` on a trusted host.
 
 ## Wire protocol
 
@@ -126,10 +131,14 @@ the simulator's URL and a `gsoSim` marker. What runs it:
   the restarted worker re-attaches by PID. It needs no `--image`. Unix only;
   meant for tests and quick local runs.
 
-`--github-sim` (or `GSO_GITHUB_SIM`) on `gso worker` puts both `github.com`
-and the simulator's host into the worker's trusted hosts, as described under
-"Worker trust settings". `gso start --github-sim <url>` points the router at
-the same simulator.
+`--github-sim <url>` on `gso worker` (the simulator's `--advertise` address)
+puts both `github.com` and the simulator's host into the worker's trusted hosts,
+as described under "Worker trust settings". `GSO_GITHUB_SIM` is read only with
+`--executor sim`: a docker worker needs the explicit flag, so an ambient
+variable cannot widen its trust. The worker logs a warning at startup whenever
+its trusted hosts differ from the default. `--trusted-host` adds to
+`github.com` in sim mode. `--executor sim` is refused on Windows.
+`gso start --github-sim <url>` is the router side (pending A3b, above).
 
 `gso sim runner` claims a job, works for the job's `--duration`, checks for
 cancellation about once a second, and reports the result. If its runner is

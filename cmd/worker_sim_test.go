@@ -1,7 +1,9 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"runtime"
 	"slices"
 	"strings"
@@ -103,5 +105,48 @@ func TestWorkerBackoffFollowsTimingScale(t *testing.T) {
 	min, max := workerBackoff()
 	if min <= 0 || max < min {
 		t.Fatalf("workerBackoff() = %s, %s", min, max)
+	}
+}
+
+// GSO_GITHUB_SIM only counts for --executor sim: a docker worker must not
+// widen its trusted hosts because of an ambient variable (security review).
+func TestSimEnvIsIgnoredByTheDockerExecutor(t *testing.T) {
+	f := baseWorkerFlags()
+	f.image = "img"
+	env := envOf(map[string]string{"GSO_GITHUB_SIM": "http://sim.lan:9300"})
+	s, err := resolveWorkerSettings(f, changedFlags("image"), env, fixedHostname("box"), fixedStateDir("/cfg/gso"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s.TrustedHosts) != 0 {
+		t.Fatalf("TrustedHosts = %v, want none: the env var must be ignored with the docker executor", s.TrustedHosts)
+	}
+}
+
+func TestSimExecutorIsRefusedOnWindows(t *testing.T) {
+	old := workerGOOS
+	workerGOOS = "windows"
+	t.Cleanup(func() { workerGOOS = old })
+	f := baseWorkerFlags()
+	f.executor, f.githubSim = "sim", "http://sim.lan:9300"
+	_, err := resolveWorkerSettings(f, changedFlags("github-sim"), envOf(nil), fixedHostname("box"), fixedStateDir("/cfg/gso"))
+	if err == nil || !strings.Contains(err.Error(), "Windows") {
+		t.Fatalf("error = %v, want a Windows refusal", err)
+	}
+}
+
+func TestLogTrustedHostsWarnsWhenNonDefault(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	logTrustedHosts(logger, workerSettings{})
+	if buf.Len() != 0 {
+		t.Fatalf("default trust logged: %s", buf.String())
+	}
+	logTrustedHosts(logger, workerSettings{TrustedHosts: []string{"github.com", "sim.lan"}, GitHubSim: "http://sim.lan:9300"})
+	out := buf.String()
+	for _, want := range []string{"level=WARN", "sim.lan", "http://sim.lan:9300", "github.com"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("log %q lacks %q", out, want)
+		}
 	}
 }

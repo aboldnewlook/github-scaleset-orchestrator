@@ -23,6 +23,7 @@ const processPollInterval = 200 * time.Millisecond
 type pidRecord struct {
 	PID     int       `json:"pid"`
 	Started time.Time `json:"started"`
+	Boot    int64     `json:"boot,omitempty"`
 }
 
 type processChild struct {
@@ -65,7 +66,19 @@ func (l *processLauncher) Classes(context.Context) ([]runner.Class, error) {
 
 func (l *processLauncher) pidPath(name string) string { return filepath.Join(l.cfg.Dir, name+".pid") }
 
+var errUnsafeRunnerName = errors.New("process launcher: unsafe runner name")
+
+// errStalePID marks a pid file written before the last reboot: its PID may now
+// belong to an unrelated process.
+var errStalePID = errors.New("pid record is from a previous boot")
+
+// bootTolerance absorbs clock adjustments in the platform's boot time.
+const bootTolerance = 5 // seconds
+
 func (l *processLauncher) Start(_ context.Context, rec RunnerRecord, jit, _ string) error {
+	if !validRunnerName(rec.Name) {
+		return errUnsafeRunnerName
+	}
 	logf, err := os.OpenFile(filepath.Join(l.cfg.Dir, rec.Name+".log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return fmt.Errorf("opening runner log: %w", err)
@@ -85,7 +98,7 @@ func (l *processLauncher) Start(_ context.Context, rec RunnerRecord, jit, _ stri
 		child.err = cmd.Wait()
 		close(child.done)
 	}()
-	data, _ := json.Marshal(pidRecord{PID: child.pid, Started: time.Now().UTC()})
+	data, _ := json.Marshal(pidRecord{PID: child.pid, Started: time.Now().UTC(), Boot: bootTime()})
 	if err := writeProcessFile(l.pidPath(rec.Name), data); err != nil {
 		_ = syscall.Kill(-child.pid, syscall.SIGKILL)
 		return fmt.Errorf("recording runner pid: %w", err)
@@ -97,6 +110,9 @@ func (l *processLauncher) Start(_ context.Context, rec RunnerRecord, jit, _ stri
 }
 
 func (l *processLauncher) Wait(ctx context.Context, rec RunnerRecord) error {
+	if !validRunnerName(rec.Name) {
+		return errUnsafeRunnerName
+	}
 	l.mu.Lock()
 	child := l.children[rec.Name]
 	l.mu.Unlock()
@@ -127,6 +143,9 @@ func (l *processLauncher) Wait(ctx context.Context, rec RunnerRecord) error {
 }
 
 func (l *processLauncher) Kill(_ context.Context, rec RunnerRecord) error {
+	if !validRunnerName(rec.Name) {
+		return errUnsafeRunnerName
+	}
 	l.mu.Lock()
 	child := l.children[rec.Name]
 	l.mu.Unlock()
@@ -178,6 +197,10 @@ func (l *processLauncher) readPID(name string) (int, error) {
 	var p pidRecord
 	if err := json.Unmarshal(data, &p); err != nil || p.PID <= 0 {
 		return 0, fmt.Errorf("pid file for %s is unreadable", name)
+	}
+	if now := bootTime(); p.Boot != 0 && now != 0 && (now-p.Boot > bootTolerance || p.Boot-now > bootTolerance) {
+		_ = os.Remove(l.pidPath(name)) // drop it without signalling the PID
+		return 0, errStalePID
 	}
 	return p.PID, nil
 }

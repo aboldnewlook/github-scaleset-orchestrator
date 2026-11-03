@@ -4,11 +4,14 @@ package worker
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -129,5 +132,101 @@ func TestProcessLauncherKillAndOrphans(t *testing.T) {
 func TestProcessLauncherValidatesConfig(t *testing.T) {
 	if _, err := NewProcessLauncher(ProcessLauncherConfig{Dir: t.TempDir(), Kind: runner.ExecutorDocker}); err == nil {
 		t.Fatal("a launcher without a command was accepted")
+	}
+}
+
+func TestProcessLauncherRefusesUnsafeRunnerNames(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	l := helperLauncher(t, dir)
+	for _, bad := range []string{"../escape", "a/b", "", "UPPER"} {
+		rec := RunnerRecord{Name: bad}
+		if err := l.Start(ctx, rec, "sleep=1ms", "none"); err == nil {
+			t.Errorf("Start(%q) succeeded", bad)
+		}
+		if err := l.Wait(ctx, rec); err == nil {
+			t.Errorf("Wait(%q) succeeded", bad)
+		}
+		if err := l.Kill(ctx, rec); err == nil {
+			t.Errorf("Kill(%q) succeeded", bad)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(dir), "escape.pid")); !os.IsNotExist(err) {
+		t.Fatalf("a pid file escaped the launcher directory: %v", err)
+	}
+}
+
+// startSleeper starts an unrelated long-lived process in its own group.
+func startSleeper(t *testing.T) int {
+	t.Helper()
+	cmd := exec.Command(os.Args[0], "-test.run=^TestHelperProcess$")
+	cmd.Env = append(os.Environ(), "PROCESS_LAUNCHER_HELPER=1", "ACTIONS_RUNNER_INPUT_JITCONFIG=sleep=60s")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); _ = cmd.Wait() })
+	return cmd.Process.Pid
+}
+
+// A pid file written before the last reboot names a PID that may now belong
+// to anything. It must be dropped without signalling or re-attaching.
+func TestProcessLauncherIgnoresRecordsFromAPreviousBoot(t *testing.T) {
+	if bootTime() == 0 {
+		t.Skip("boot time is unknown on this platform")
+	}
+	ctx := context.Background()
+	dir := t.TempDir()
+	l := helperLauncher(t, dir)
+	pid := startSleeper(t)
+	stale := func(name string) {
+		data, _ := json.Marshal(pidRecord{PID: pid, Started: time.Now().UTC(), Boot: bootTime() - 3600})
+		if err := os.WriteFile(filepath.Join(dir, name+".pid"), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	alive := func() bool { return processAlive(pid) }
+
+	stale("gso-sim-a-stale1")
+	if err := l.Kill(ctx, RunnerRecord{Name: "gso-sim-a-stale1"}); err != nil {
+		t.Fatal(err)
+	}
+	stale("gso-sim-a-stale2")
+	if err := l.RemoveOrphans(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+	stale("gso-sim-a-stale3")
+	waitCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	if err := l.Wait(waitCtx, RunnerRecord{Name: "gso-sim-a-stale3"}); errors.Is(err, context.DeadlineExceeded) {
+		t.Fatal("Wait re-attached to a stale record")
+	}
+	if !alive() {
+		t.Fatal("a stale record got an unrelated process killed")
+	}
+	files, _ := filepath.Glob(filepath.Join(dir, "*.pid"))
+	if len(files) != 0 {
+		t.Fatalf("stale pid files left behind: %v", files)
+	}
+}
+
+func TestProcessLauncherRecordsTheBootTime(t *testing.T) {
+	if bootTime() == 0 {
+		t.Skip("boot time is unknown on this platform")
+	}
+	dir := t.TempDir()
+	l := helperLauncher(t, dir)
+	rec := RunnerRecord{Name: "gso-sim-a-boot01"}
+	if err := l.Start(context.Background(), rec, "sleep=1s", "none"); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = l.Kill(context.Background(), rec) }()
+	data, err := os.ReadFile(filepath.Join(dir, rec.Name+".pid"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var p pidRecord
+	if err := json.Unmarshal(data, &p); err != nil || p.Boot != bootTime() {
+		t.Fatalf("pid record = %+v (%v), want Boot %d", p, err, bootTime())
 	}
 }

@@ -53,7 +53,7 @@ func RunFakeRunner(ctx context.Context, encodedJIT string, logger *slog.Logger) 
 	if sj.ServerURL == "" {
 		return errors.New("fake runner: the JIT config carries no simulator URL")
 	}
-	h := httpDoer{base: strings.TrimRight(sj.ServerURL, "/"), client: &http.Client{Timeout: fakeRunnerHTTPTimeout}}
+	h := httpDoer{base: strings.TrimRight(sj.ServerURL, "/"), client: newFakeRunnerHTTPClient()}
 	log := logger.With("runner", sj.RunnerName)
 	log.Info("fake runner waiting for a job", "sim", h.base)
 
@@ -132,5 +132,14 @@ func completeJob(ctx context.Context, h httpDoer, sj SimJIT, jobID int64, result
 				return err
 			}
 		}
+	}
+}
+
+// newFakeRunnerHTTPClient never follows redirects: the runner token travels in
+// the request body and must only go to the simulator named in the JIT config.
+func newFakeRunnerHTTPClient() *http.Client {
+	return &http.Client{
+		Timeout:       fakeRunnerHTTPTimeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
 }

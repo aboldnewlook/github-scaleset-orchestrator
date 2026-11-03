@@ -154,8 +154,10 @@ func TestVerifyJITServerURLs(t *testing.T) {
 		{"lookalike suffix", mk(`,"serverUrl":"https://evilgithubusercontent.com/"`), OfferCheck{Repo: "o/r", Allowlist: allow}, true},
 		{"http serverUrl", mk(`,"serverUrl":"http://pipelines.actions.githubusercontent.com/"`), OfferCheck{Repo: "o/r", Allowlist: allow}, true},
 		{"userinfo serverUrl", mk(`,"serverUrl":"https://github.com@evil.example/"`), OfferCheck{Repo: "o/r", Allowlist: allow}, true},
-		{"sim host without override", jitWith(t, `{"gitHubUrl":"http://127.0.0.1:8080/o/r","serverUrl":"http://127.0.0.1:8080/"}`), OfferCheck{Repo: "o/r", Allowlist: allow}, true},
-		{"sim host with TrustedHosts", jitWith(t, `{"gitHubUrl":"http://127.0.0.1:8080/o/r","serverUrl":"http://127.0.0.1:8080/"}`), OfferCheck{Repo: "o/r", Allowlist: allow, TrustedHosts: []string{"127.0.0.1"}}, false},
+		{"sim host without override", jitWith(t, `{"gitHubUrl":"https://github.com/o/r","serverUrl":"http://127.0.0.1:8080/"}`), OfferCheck{Repo: "o/r", Allowlist: allow}, true},
+		{"sim serverUrl with TrustedHosts", jitWith(t, `{"gitHubUrl":"https://github.com/o/r","serverUrl":"http://127.0.0.1:8080/"}`), OfferCheck{Repo: "o/r", Allowlist: allow, TrustedHosts: []string{"github.com", "127.0.0.1"}}, false},
+		{"http gitHubUrl is rejected even on a trusted host", jitWith(t, `{"gitHubUrl":"http://127.0.0.1:8080/o/r","serverUrl":"http://127.0.0.1:8080/"}`), OfferCheck{Repo: "o/r", Allowlist: allow, TrustedHosts: []string{"github.com", "127.0.0.1"}}, true},
+		{"http github.com gitHubUrl is rejected with TrustedHosts", jitWith(t, `{"gitHubUrl":"http://github.com/o/r","serverUrl":"http://127.0.0.1:8080/"}`), OfferCheck{Repo: "o/r", Allowlist: allow, TrustedHosts: []string{"github.com", "127.0.0.1"}}, true},
 		{"TrustedHosts still rejects others", mk(`,"serverUrl":"https://evil.example/"`), OfferCheck{Repo: "o/r", Allowlist: allow, TrustedHosts: []string{"127.0.0.1"}}, true},
 	}
 	for _, tt := range tests {

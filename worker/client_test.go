@@ -313,7 +313,21 @@ func TestClientPassesTrustedHostsToJITVerification(t *testing.T) {
 
 	h2 := newHarness(t)
 	h2.router.SetJITHostOverride("http://127.0.0.1:9300")
-	h2.start(h2.config(func(c *worker.Config) { c.TrustedHosts = []string{"127.0.0.1"} }))
+	h2.start(h2.config(func(c *worker.Config) { c.TrustedHosts = []string{"github.com", "127.0.0.1"} }))
 	_, name := h2.router.Offer("acme/app", "linux-x64", false)
 	h2.router.WaitPhase(t, name, phaseRunning, waitTimeout)
+}
+
+// A router-supplied runner name becomes a file name in the launchers, so the
+// worker refuses names that are not plain lowercase tokens (security review).
+func TestClientRejectsUnsafeRunnerNames(t *testing.T) {
+	h := newHarness(t)
+	h.start(h.config())
+	for _, bad := range []string{"../../etc/x", "gso/evil", `gso\evil`, "Gso-Upper", "-leading", ".hidden", strings.Repeat("a", 65)} {
+		_, name := h.router.OfferNamed("acme/app", "linux-x64", false, bad)
+		waitFor(t, "unsafe name "+bad+" rejected", func() bool { return slices.Contains(h.router.Rejected(), name) })
+	}
+	if got := h.router.Accepted(); len(got) != 0 {
+		t.Fatalf("accepted %v, want none", got)
+	}
 }

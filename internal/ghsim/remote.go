@@ -78,7 +78,7 @@ func (h httpDoer) do(ctx context.Context, method, path string, in, out any) (int
 	if resp.StatusCode != http.StatusOK || out == nil {
 		return resp.StatusCode, nil
 	}
-	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBody)).Decode(out); err != nil {
 		return resp.StatusCode, fmt.Errorf("ghsim: decoding %s %s: %w", method, path, err)
 	}
 	return resp.StatusCode, nil
@@ -88,7 +88,7 @@ func (h httpDoer) do(ctx context.Context, method, path string, in, out any) (int
 // served by NewServer at baseURL.
 func NewRemoteFactory(baseURL string, httpClient *http.Client) ghapi.Factory {
 	if httpClient == nil {
-		httpClient = &http.Client{Timeout: 2 * time.Minute}
+		httpClient = newRemoteHTTPClient()
 	}
 	h := httpDoer{base: strings.TrimRight(baseURL, "/"), client: httpClient}
 	return func(_ context.Context, repo config.Repo) (ghapi.Client, error) {
@@ -234,3 +234,15 @@ func (s *remoteSession) Close(ctx context.Context) error {
 	}
 	return err
 }
+
+// newRemoteHTTPClient is the default client of NewRemoteFactory. It never
+// follows redirects.
+func newRemoteHTTPClient() *http.Client {
+	return &http.Client{
+		Timeout:       2 * time.Minute,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+}
+
+// maxResponseBody caps a decoded 200 response from the simulator.
+const maxResponseBody = 1 << 20

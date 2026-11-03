@@ -1,9 +1,11 @@
 package ghsim
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"net"
+	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -133,5 +135,41 @@ func TestFakeRunnerRefusesARealJIT(t *testing.T) {
 	realJIT := base64.StdEncoding.EncodeToString([]byte(`{".runner":"` + runnerFile + `"}`))
 	if err := RunFakeRunner(context.Background(), realJIT, nil); err == nil {
 		t.Fatal("the fake runner accepted a real JIT config")
+	}
+}
+
+// A redirect from the simulator must not be followed: the runner token rides
+// in the request body and a redirect could carry it elsewhere.
+func TestSimClientsDoNotFollowRedirects(t *testing.T) {
+	var hits int
+	target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { hits++ }))
+	t.Cleanup(target.Close)
+	redirector := httptest.NewServer(http.RedirectHandler(target.URL, http.StatusTemporaryRedirect))
+	t.Cleanup(redirector.Close)
+
+	clients := map[string]*http.Client{"fake runner": newFakeRunnerHTTPClient(), "remote factory": newRemoteHTTPClient()}
+	for name, c := range clients {
+		h := httpDoer{base: redirector.URL, client: c}
+		status, err := h.do(context.Background(), http.MethodPost, "/runner/claim", runnerRequest{Name: "n", Token: "secret"}, nil)
+		if status != http.StatusTemporaryRedirect {
+			t.Errorf("%s: status = %d (err %v), want the 307 returned as is", name, status, err)
+		}
+	}
+	if hits != 0 {
+		t.Fatalf("a redirect was followed %d times", hits)
+	}
+}
+
+func TestSimClientBoundsResponseBodies(t *testing.T) {
+	big := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"a":"`))
+		_, _ = w.Write(bytes.Repeat([]byte("x"), 2<<20))
+		_, _ = w.Write([]byte(`"}`))
+	}))
+	t.Cleanup(big.Close)
+	h := httpDoer{base: big.URL, client: big.Client()}
+	var out map[string]string
+	if _, err := h.do(context.Background(), http.MethodGet, "/", nil, &out); err == nil {
+		t.Fatal("a 2 MiB response body was decoded")
 	}
 }

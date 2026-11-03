@@ -53,6 +53,7 @@ type workerSettings struct {
 	CPUs            float64
 	Allow           []string
 	TrustedHosts    []string
+	GitHubSim       string // simulator URL in effect ("" outside sim mode)
 	AcceptPublic    worker.PublicMode
 	CredentialStore string
 	Yes             bool
@@ -86,7 +87,7 @@ func init() {
 	f.StringVar(&wf.name, "name", "", "worker name (env GSO_WORKER_NAME; default: this host's name)")
 	f.StringVar(&wf.stateDir, "state-dir", "", "directory for the credential, enrollment state and runner records (default: <config dir>/gso/worker)")
 	f.StringVar(&wf.executor, "executor", "docker", "executor: docker, or sim (testing: runs the simulator's fake runner as a process)")
-	f.StringVar(&wf.githubSim, "github-sim", "", "URL of the gso GitHub simulator the router uses (env GSO_GITHUB_SIM; testing only): its host is trusted in job configs next to github.com")
+	f.StringVar(&wf.githubSim, "github-sim", "", "the simulator's --advertise address, the host in the JIT serverUrl (testing only; env GSO_GITHUB_SIM is read only with --executor sim): its host is trusted in job configs next to github.com")
 	f.IntVar(&wf.slots, "slots", 1, "jobs to run at once (env GSO_WORKER_SLOTS); the router clamps this to the enrolled bounds")
 	f.StringVar(&wf.image, "image", "", "job image for docker runners (env GSO_WORKER_IMAGE), e.g. ghcr.io/aboldnewlook/github-scaleset-orchestrator:<tag>")
 	f.StringVar(&wf.dockerHost, "docker-host", "", "docker engine endpoint (env GSO_WORKER_DOCKER_HOST; default unix:///var/run/docker.sock)")
@@ -95,7 +96,7 @@ func init() {
 	f.StringSliceVar(&wf.allow, "allow", nil, "repositories to run jobs for, as owner/* or owner/repo (repeatable; default: the owners granted at enrollment)")
 	f.StringVar(&wf.acceptPublic, "accept-public", "follow", "public repositories: follow (the router's default), accept or refuse (env GSO_WORKER_ACCEPT_PUBLIC)")
 	f.StringVar(&wf.credentialStore, "credential-store", "file", "where the worker credential lives: file (<state-dir>/credential, mode 0600) or keychain")
-	f.StringSliceVar(&wf.trustedHosts, "trusted-host", nil, "GitHub host to accept in job configs instead of github.com (repeatable; for simulator routers only)")
+	f.StringSliceVar(&wf.trustedHosts, "trusted-host", nil, "GitHub host to accept in job configs (repeatable; for simulator routers only). Outside sim mode it replaces github.com; with --github-sim or --executor sim it adds to github.com")
 	f.BoolVar(&wf.yes, "yes", false, "enroll without asking to confirm the router's address and key")
 }
 
@@ -138,7 +139,15 @@ func resolveWorkerSettings(f workerFlags, changed func(string) bool, getenv func
 			s.TrustedHosts = append(s.TrustedHosts, h)
 		}
 	}
-	simURL := str("github-sim", "GSO_GITHUB_SIM", f.githubSim)
+	// GSO_GITHUB_SIM is read only for the sim executor. A docker worker widens
+	// its trusted hosts only on an explicit --github-sim, never from an ambient
+	// variable.
+	isSim := strings.EqualFold(strings.TrimSpace(f.executor), "sim")
+	simURL := strings.TrimSpace(f.githubSim)
+	if isSim {
+		simURL = str("github-sim", "GSO_GITHUB_SIM", f.githubSim)
+	}
+	s.GitHubSim = simURL
 	if !changed("slots") {
 		if v := strings.TrimSpace(getenv("GSO_WORKER_SLOTS")); v != "" {
 			n, err := strconv.Atoi(v)
@@ -169,6 +178,9 @@ func resolveWorkerSettings(f workerFlags, changed func(string) bool, getenv func
 		}
 		s.Executor, s.NewLauncher = runner.ExecutorDocker, newDockerLauncher
 	case "sim":
+		if workerGOOS == "windows" {
+			return workerSettings{}, errors.New("--executor sim is not supported on Windows (it needs process groups)")
+		}
 		if simURL == "" && len(s.TrustedHosts) == 0 {
 			return workerSettings{}, errors.New("--executor sim needs --github-sim (GSO_GITHUB_SIM) or --trusted-host, so the worker accepts the simulator's job configs")
 		}
@@ -178,7 +190,7 @@ func resolveWorkerSettings(f workerFlags, changed func(string) bool, getenv func
 	default:
 		return workerSettings{}, fmt.Errorf("unknown --executor %q; use docker or sim", f.executor)
 	}
-	trusted, err := simTrustedHosts(simURL, strings.EqualFold(strings.TrimSpace(f.executor), "sim"), s.TrustedHosts)
+	trusted, err := simTrustedHosts(simURL, isSim, s.TrustedHosts)
 	if err != nil {
 		return workerSettings{}, err
 	}
@@ -293,6 +305,7 @@ func runWorker(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	c.SetAvailability(worker.Available)
+	logTrustedHosts(logger, s)
 	logger.Info("starting gso worker", "name", st.Name, "router", dial, "executor", s.Executor, "slots", s.Slots, "allow", allow, "accept_public", s.AcceptPublic)
 	if err := c.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		return err

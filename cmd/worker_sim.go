@@ -3,6 +3,7 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -73,4 +74,16 @@ func simTrustedHosts(simURL string, simExecutor bool, explicit []string) ([]stri
 		}
 	}
 	return hosts, nil
+}
+
+// workerGOOS is runtime.GOOS; tests replace it.
+var workerGOOS = runtime.GOOS
+
+// logTrustedHosts warns at startup when the worker trusts hosts beyond the
+// GitHub defaults, so a widened trust list is never silent.
+func logTrustedHosts(logger *slog.Logger, s workerSettings) {
+	if len(s.TrustedHosts) == 0 {
+		return
+	}
+	logger.Warn("trusting non-default hosts in job configs", "trusted_hosts", s.TrustedHosts, "github_sim", s.GitHubSim)
 }
