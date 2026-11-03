@@ -27,12 +27,19 @@ could pick a different name.
 1. Wait for running jobs to finish, then stop the old gso. Its listener holds
    the session for the old scale set.
 2. Delete the old `gso-<hostname>-<repo>` scale sets (the legacy scale sets)
-   with gso itself. List them per repo, then delete each by id:
+   with gso itself. List every gso scale set per repo, then delete each stale
+   one by id:
 
    ```sh
-   gso scaleset list --repo owner/name
+   gso scaleset list --all --repo owner/name
    gso scaleset delete <id> --repo owner/name
    ```
+
+   `KIND` is `current` (a name the new release uses), `legacy` (this host's
+   old name) or `other` (another gso instance's, or an orphan from an earlier
+   container hostname). Delete `legacy` and `other` scale sets only when no
+   other running gso instance owns them. A plain `gso scaleset list` shows only
+   the current name and cannot see orphans.
 
    The new gso also prints the stale sets as `name (#id)` in its warning and
    `stale_scale_sets` alert, so you can copy the id from there. With identical
@@ -52,7 +59,36 @@ recreate the scale set. gso no longer does that: runners placed on workers, or
 adopted after a restart, belong to the scale set. A 409 is now retried every
 30 seconds, up to 10 times, and then every 5 minutes, and the listener is
 marked degraded when the retries run out. If you really need to recreate a
-scale set after a 409, use `gso scaleset reset` (added in a later release).
+scale set after a 409, run:
+
+```sh
+gso scaleset reset <owner/repo> <class>   # e.g. linux-x64
+```
+
+This deletes this instance's scale set for that repo and class. The running
+gso recreates it on its next listener retry. `reset` is the only command that
+deletes a scale set for you, and it refuses rather than risk a live one:
+
+- when this machine's gso reports the listener `running` (a `degraded` or
+  `retrying` listener is the case it is for);
+- when another gso, possibly on another host, holds the scale set's message
+  session (stop it, or wait for the session to expire);
+- when the scale set has busy runners or assigned, acquired or running jobs,
+  or when GitHub returns no statistics for it;
+- when the liveness probe fails for any reason other than a held session
+  (unknown is treated as live);
+- for any class other than the default class (`workers.default_class`, else
+  the host's class): only that class is served until multi-class support, so
+  nothing would recreate the scale set.
+
+The liveness probe (a brief message session) is skipped only when the local
+gso reports the listener for that exact scale set as `degraded` or
+`retrying`. `--force` only skips the confirmation prompt; it does not
+override a refusal.
+
+Verify in the live test: idle runners registered to the scale set are
+removed with it, and the real service returns statistics on both the lookup
+and the probe session.
 
 ### Listener supervision
 
@@ -61,3 +97,12 @@ from 1 second to 5 minutes, and it is marked `degraded` after 3 consecutive
 failures (a `listener.degraded` event, then `listener.recovered` when it is
 back). In-flight runners keep their slots across a restart. `gso status` lists
 each listener's state, failure count and last error.
+
+### Rollback
+
+1. Stop the new release.
+2. Run `gso scaleset list --all` and delete the `current` scale sets with
+   `gso scaleset delete <id> --repo <repo>`. (`gso scaleset reset` refuses
+   while a gso is live, so stop it first.)
+3. Start the previous release. It recreates `gso-<hostname>-<repo>` on start.
+   There is no other state to undo.

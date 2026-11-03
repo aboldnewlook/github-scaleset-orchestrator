@@ -3,6 +3,7 @@ package cmd
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -10,7 +11,9 @@ import (
 	"strings"
 
 	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/config"
+	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/control"
 	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/service"
+	"github.com/aboldnewlook/github-scaleset-orchestrator/runner"
 	"github.com/spf13/cobra"
 )
 
@@ -39,10 +42,26 @@ var scalesetDeleteCmd = &cobra.Command{
 	RunE:  runScalesetDelete,
 }
 
+var scalesetResetCmd = &cobra.Command{
+	Use:   "reset <repo> <class>",
+	Short: "Delete this instance's scale set for a repo and class so the daemon recreates it",
+	Long: "Deletes the scale set gso uses for <repo> and <class> (for example linux-x64) so a running " +
+		"gso recreates it on its next listener retry. gso never deletes a scale set by itself, not even " +
+		"on a 409; this is the manual escape hatch. Only the default class is served, so only it can be reset.\n\n" +
+		"reset refuses (and --force does not override) when the scale set has busy runners or jobs in " +
+		"flight, when this machine's gso reports the listener running, or when another gso holds the " +
+		"scale set's message session. Stop that gso, or wait, and run reset again. A listener that is " +
+		"degraded or retrying after a 409 is the case reset is for.",
+	Args: cobra.ExactArgs(2),
+	RunE: runScalesetReset,
+}
+
 var (
 	scalesetListRepo   string
+	scalesetListAll    bool
 	scalesetDeleteRepo string
 	scalesetForce      bool
+	scalesetResetForce bool
 )
 
 func init() {
@@ -50,13 +69,19 @@ func init() {
 	scalesetCmd.AddCommand(scalesetListCmd)
 	scalesetCmd.AddCommand(scalesetInspectCmd)
 	scalesetCmd.AddCommand(scalesetDeleteCmd)
+	scalesetCmd.AddCommand(scalesetResetCmd)
 
 	scalesetListCmd.Flags().StringVarP(&scalesetListRepo, "repo", "r", "", "filter by repo (owner/name)")
+	scalesetListCmd.Flags().BoolVar(&scalesetListAll, "all", false, "list every gso-* scale set per repo: current, legacy and other instances'")
 	scalesetDeleteCmd.Flags().StringVarP(&scalesetDeleteRepo, "repo", "r", "", "repo for the scale set (required)")
 	scalesetDeleteCmd.Flags().BoolVar(&scalesetForce, "force", false, "skip confirmation prompt")
+	scalesetResetCmd.Flags().BoolVar(&scalesetResetForce, "force", false, "skip confirmation prompt (safety refusals still apply)")
 }
 
 func runScalesetList(cmd *cobra.Command, args []string) error {
+	if scalesetListAll {
+		return runScalesetListAll()
+	}
 	cfg, err := config.Load(cfgFile)
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
@@ -181,4 +206,79 @@ func runScalesetDelete(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("Scale set %d deleted\n", id)
 	return nil
+}
+
+func runScalesetListAll() error {
+	cfg, err := config.Load(cfgFile)
+	if err != nil {
+		return fmt.Errorf("loading config: %w", err)
+	}
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	sets, err := service.NewQuery(cfg, logger).ScaleSetsAll(context.Background(), scalesetListRepo)
+	if err != nil {
+		return fmt.Errorf("listing scale sets: %w", err)
+	}
+	if len(sets) == 0 {
+		fmt.Println("No gso scale sets found")
+		return nil
+	}
+	rows := make([][]string, 0, len(sets))
+	for _, ss := range sets {
+		runners, busy, jobs := "-", "-", "-"
+		if ss.Statistics != nil {
+			runners = fmt.Sprintf("%d", ss.Statistics.TotalRegisteredRunners)
+			busy = fmt.Sprintf("%d", ss.Statistics.TotalBusyRunners)
+			jobs = fmt.Sprintf("%d", ss.Statistics.TotalAssignedJobs)
+		}
+		rows = append(rows, []string{fmt.Sprintf("%d", ss.ID), ss.Name, ss.Repo, string(ss.Kind), runners, busy, jobs})
+	}
+	return printTable([]string{"ID", "NAME", "REPO", "KIND", "RUNNERS", "BUSY", "JOBS"}, rows)
+}
+
+func runScalesetReset(cmd *cobra.Command, args []string) error {
+	repo := args[0]
+	class, err := runner.ParseClass(args[1])
+	if err != nil {
+		return err
+	}
+	if !scalesetResetForce {
+		fmt.Printf("Delete this instance's %s scale set for %s? Idle runners registered to it are removed with it. [y/N] ", class, repo)
+		answer, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+		answer = strings.TrimSpace(strings.ToLower(answer))
+		if answer != "y" && answer != "yes" {
+			fmt.Println("Cancelled")
+			return nil
+		}
+	}
+	cfg, err := config.Load(cfgFile)
+	if err != nil {
+		return fmt.Errorf("loading config: %w", err)
+	}
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	q := service.NewQueryWith(cfg, logger, service.Deps{Listeners: liveListeners})
+	name, id, err := q.ResetScaleSet(context.Background(), repo, class)
+	if err != nil {
+		return fmt.Errorf("resetting scale set: %w", err)
+	}
+	fmt.Printf("Deleted scale set %s (#%d). A running gso recreates it on its next listener retry.\n", name, id)
+	return nil
+}
+
+// liveListeners asks the running gso (local socket, or --remote) for its
+// listeners so reset can tell a stuck listener from a healthy one.
+func liveListeners(ctx context.Context) ([]control.ListenerLiveStatus, error) {
+	client, err := connectClient(remoteAddr)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = client.Close() }()
+	result, err := client.Call(ctx, control.MethodLiveStatus, nil)
+	if err != nil {
+		return nil, err
+	}
+	var live control.LiveStatusResult
+	if err := json.Unmarshal(result, &live); err != nil {
+		return nil, err
+	}
+	return live.Listeners, nil
 }
