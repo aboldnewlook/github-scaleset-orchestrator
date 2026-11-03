@@ -1,22 +1,93 @@
+# gso on one Docker host (e.g. Unraid): a router plus one worker.
+#
+# The router holds the GitHub PAT and has NO Docker socket. The worker holds
+# the Docker socket and NO PAT. If a job escapes its container it lands where
+# there is no PAT; if the router is compromised there is no host socket.
+# Guide: docs/unraid-portainer.md. Security notes: docs/security.md.
+#
+# Stack variables:
+#   GSO_TAG                 gso release tag, used by every service (e.g. 0.9.0)
+#   GITHUB_TOKEN            token that can administer runners and GET /repos/{owner}/{repo}
+#   GSO_WORKERS_ADVERTISE   host:port that workers dial, e.g. unraid.lan:9200
+#   GSO_WORKERS_ALLOW_CIDRS optional; default = your LAN + the compose network
+#   GSO_INSTANCE_ID         optional; stable scale-set instance name (default unraid)
+#   GSO_WORKER_JOIN         join string from `gso workers add` (first start only)
+#
+# Simulator dry run (all three, plus the profile; see docs/unraid-portainer.md):
+#   COMPOSE_PROFILES=sim
+#   GSO_GITHUB_SIM=http://gso-sim:9300             router -> simulator (compose network)
+#   GSO_SIM_ADVERTISE=http://172.17.0.1:9300       what job containers and the worker use
+#   GSO_SIM_HOST=172.17.0.1                        optional; the address the simulator port binds to
+#
+# Bootstrap, once:
+#   1. Deploy with GSO_WORKER_JOIN empty. The router starts; the worker exits
+#      with "not enrolled" and restarts until step 3.
+#   2. docker exec gso-router gso workers add unraid --classes linux-x64 --slots 2
+#   3. Put the printed join string in GSO_WORKER_JOIN and redeploy.
 services:
-  gso:
-    image: ghcr.io/aboldnewlook/github-scaleset-orchestrator:latest
-    # For local builds, comment out image and uncomment build:
-    # build: .
+  gso-router:
+    image: ghcr.io/aboldnewlook/github-scaleset-orchestrator:${GSO_TAG:?set GSO_TAG to a gso release tag}
+    container_name: gso-router
+    hostname: gso-router
+    command: ["start", "--config", "/etc/gso/config.yaml"]
     environment:
-      - GITHUB_TOKEN=${GITHUB_TOKEN}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      GSO_MAX_RUNNERS: "0"                      # the router runs no jobs
+      # Container hostnames are not stable; scale sets are named from this.
+      GSO_RUNNER_INSTANCE_ID: ${GSO_INSTANCE_ID:-unraid}
+      GSO_WORKERS_LISTEN: ":9200"
+      GSO_WORKERS_ADVERTISE: ${GSO_WORKERS_ADVERTISE:?set GSO_WORKERS_ADVERTISE to host:port workers dial}
+      # Narrow this to your LAN /24 plus the compose network (Docker uses 172.16.0.0/12).
+      GSO_WORKERS_ALLOW_CIDRS: ${GSO_WORKERS_ALLOW_CIDRS:-192.168.0.0/16,172.16.0.0/12}
+      # Empty (ignored) unless you run the `sim` profile.
+      GSO_GITHUB_SIM: ${GSO_GITHUB_SIM:-}
     volumes:
       - ./config.yaml:/etc/gso/config.yaml:ro
+      - gso-router-state:/home/runner/.config/gso   # TLS key, workers.json, classes.json
+    ports:
+      - "9200:9200"
     restart: unless-stopped
-    # Uncomment to use Docker secrets instead of env vars:
-    # secrets:
-    #   - gh_token
-    # In config.yaml, set:
-    #   auth:
-    #     file: /run/secrets/gh_token
-    # gso refuses token files readable by group or others. On the host:
-    #   chmod 600 gh_token.txt && sudo chown 1001 gh_token.txt   # 1001 = the image's runner user
+    # Deliberately no /var/run/docker.sock.
 
-# secrets:
-#   gh_token:
-#     file: ./gh_token.txt
+  gso-worker:
+    image: ghcr.io/aboldnewlook/github-scaleset-orchestrator:${GSO_TAG:?set GSO_TAG to a gso release tag}
+    container_name: gso-worker
+    hostname: gso-worker
+    # The trailing --github-sim is empty in a normal deploy. In the sim profile
+    # it names the simulator so the worker trusts its job configs; a docker
+    # worker ignores GSO_GITHUB_SIM in the environment on purpose.
+    command: ["worker", "--router", "gso-router:9200", "--executor", "docker", "--slots", "2", "--github-sim", "${GSO_SIM_ADVERTISE:-}"]
+    # The worker starts job containers through the host Docker socket, which
+    # is root:root (or root:docker) on Unraid. Root inside this container is
+    # the same trust level as the socket itself. Jobs still run as the image's
+    # non-root `runner` user in their own sibling containers.
+    user: "0:0"
+    environment:
+      GSO_WORKER_JOIN: ${GSO_WORKER_JOIN:-}     # ignored once enrolled
+      GSO_WORKER_IMAGE: ghcr.io/aboldnewlook/github-scaleset-orchestrator:${GSO_TAG:?set GSO_TAG to a gso release tag}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - gso-worker-state:/home/runner/.config/gso   # credential, pin, runners.json
+    depends_on:
+      - gso-router
+    restart: unless-stopped
+    # Deliberately no GITHUB_TOKEN and no config.yaml.
+
+  # Optional GitHub simulator for a dry run (docs/simulator.md). Start it with
+  # `docker compose --profile sim up -d` (Portainer: stack variable COMPOSE_PROFILES=sim).
+  # Plain HTTP, no auth: never expose it beyond a trusted network. The port is
+  # published only on the Docker bridge gateway (172.17.0.1 by default), which
+  # job containers on the default bridge can reach and the LAN cannot. The
+  # router and worker reach it by compose name or that address.
+  gso-sim:
+    image: ghcr.io/aboldnewlook/github-scaleset-orchestrator:${GSO_TAG:?set GSO_TAG to a gso release tag}
+    container_name: gso-sim
+    profiles: ["sim"]
+    command: ["sim", "serve", "--listen", ":9300", "--advertise", "${GSO_SIM_ADVERTISE:-http://172.17.0.1:9300}"]
+    ports:
+      - "${GSO_SIM_HOST:-172.17.0.1}:9300:9300"
+    restart: unless-stopped
+
+volumes:
+  gso-router-state: {}
+  gso-worker-state: {}

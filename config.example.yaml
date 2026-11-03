@@ -74,3 +74,19 @@ repos:
 #   allow_cidrs:                       # optional: restrict TCP to these CIDRs
 #     - 192.168.1.0/24
 #     - 10.0.0.0/8
+
+# --- Example: the Unraid router (docker-compose.yaml, docs/unraid-portainer.md) ---
+# The router runs no jobs and has no Docker socket. A separate `gso worker`
+# container, plus any other enrolled machine, executes them. The token must be
+# able to GET /repos/{owner}/{repo} (the router reads visibility before it
+# creates a repo's scale set).
+#
+# max_runners: 0                 # no local runners; requires workers.listen
+# runner:
+#   instance_id: unraid          # explicit: container hostnames are not stable; scale sets are gso-unraid-<repo>-<class>
+# workers:
+#   listen: ":9200"
+#   advertise: "unraid.lan:9200" # the address join strings tell workers to dial
+#   allow_cidrs:                 # your LAN plus the compose network
+#     - 192.168.1.0/24
+#     - 172.16.0.0/12
