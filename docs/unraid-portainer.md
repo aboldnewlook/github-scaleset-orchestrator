@@ -72,15 +72,7 @@ repos:
 
 ### Public repositories
 
-Public repositories are **off by default**. Allow them deliberately, and read [security.md](security.md#remote-workers) first:
-
-```yaml
-public:
-  allow: true                  # serve public repos at all (per repo: allow_public)
-  worker_default_accept: false # workers must opt in with --accept-public accept
-```
-
-Even when allowed, a public repository's jobs are offered only to workers that opted in, and the job cache is forced off for them.
+The router reads each repository's visibility before it creates the scale set (see step 1). A public repository's jobs go to a remote worker only if that worker opted in with `--accept-public accept` (the compose worker does not, so on this stack a public repository's jobs are not run by it), and the job cache is forced off for public jobs. The router's own local member currently accepts public repositories, but this stack's router has no local slots (`max_runners: 0`). There are no router-level `public.*` settings yet. Read [security.md](security.md#public-repositories) before opting any worker in.
 
 ## Step 3: The compose file
 
@@ -97,13 +89,15 @@ Stack variables:
 | `GSO_TAG` | yes | gso release tag, e.g. `0.9.0`. Router, worker and job image share it. |
 | `GITHUB_TOKEN` | yes | The token from step 1. |
 | `GSO_WORKERS_ADVERTISE` | yes | `host:port` other machines dial, e.g. `unraid.lan:9200`. Join strings carry it. |
-| `GSO_WORKERS_ALLOW_CIDRS` | no | Source networks allowed to reach port 9200. Default `192.168.0.0/16,172.16.0.0/12`. Narrow it to your LAN `/24` plus the compose network. |
+| `GSO_WORKERS_ALLOW_CIDRS` | no | Source networks allowed to reach port 9200. Default `10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,100.64.0.0/10,127.0.0.0/8` (gso's own default). Narrow it to your LAN `/24` plus the compose network (`172.16.0.0/12`). |
 | `GSO_WORKER_JOIN` | first start | The Unraid worker's join string (step 5). Ignored once the worker is enrolled. |
 | `GSO_INSTANCE_ID` | no | Overrides the default instance id `unraid`. |
 
 ## Step 4: Deploy the stack in Portainer
 
 ### Option A: From a Git repository
+
+This works only from **your own repository** that holds `docker-compose.yaml` **and your `config.yaml` next to it**. The upstream gso repository has no `config.yaml`, so deploying it directly would fail: the router's config mount sets `create_host_path: false`, so the stack refuses to start rather than creating an empty directory in place of the file. If you do not want a repository of your own, use Option B.
 
 1. **Stacks** > **Add stack**, name it `gso`.
 2. Build method **Repository**: your repository URL, reference `refs/heads/main`, compose path `docker-compose.yaml`.
@@ -114,17 +108,23 @@ Stack variables:
 
 1. **Stacks** > **Add stack**, name `gso`, build method **Web editor**, and paste `docker-compose.yaml`.
 2. Set the same environment variables.
-3. Change `./config.yaml` in the router's volumes to the file's absolute path, e.g. `/mnt/user/appdata/gso/config.yaml:/etc/gso/config.yaml:ro`.
+3. Change `source: ./config.yaml` in the router's volumes to the file's absolute path, e.g. `source: /mnt/user/appdata/gso/config.yaml`. Create that file first (step 2): the mount does not create it.
 4. **Deploy the stack**.
 
 The router starts and creates its scale sets. Until step 5 the worker exits with "not enrolled" and restarts every few seconds. That is expected.
 
 ## Step 5: Enroll the Unraid worker
 
-Worker administration (`gso workers add|update|list|drain|revoke`) works **only over the router's local unix control socket**, never over the network. On Unraid that means running it inside the router container with `docker exec` (terminal or Portainer's container console):
+Worker administration (`gso workers add|update|list|drain|revoke`) works **only over the router's local unix control socket**, never over the network. On Unraid that means running it inside the router container. From the Unraid terminal use `docker exec`:
 
 ```bash
 docker exec gso-router gso workers add unraid --classes linux-x64 --slots 2
+```
+
+In Portainer's console for the `gso-router` container (**Containers** > `gso-router` > **Console**, command `/bin/sh`) there is no `docker` CLI, so run the bare form:
+
+```bash
+gso workers add unraid --classes linux-x64 --slots 2
 ```
 
 It prints a join string such as `gso-join:v1:unraid.lan:9200:<pin>:<code>`. The code is single-use and expires after 15 minutes.
@@ -138,7 +138,7 @@ It prints a join string such as `gso-join:v1:unraid.lan:9200:<pin>:<code>`. The 
 ## Step 6: Verify
 
 ```bash
-docker exec gso-router gso workers list                                        # unraid: connected, available, 2 slots
+docker exec gso-router gso workers list                                        # unraid: available, 0/2 busy, linux-x64 (bare: gso workers list)
 docker exec gso-router gso scaleset list --all --config /etc/gso/config.yaml   # scale sets per repo
 ```
 
@@ -172,7 +172,7 @@ Without `--router` it dials the advertise address from the join string. Make sur
 
 | Volume | Contents | If lost |
 |---|---|---|
-| `gso-router-state` | `tls/` (control TLS), **`workers/tls/key.pem`** (the key every worker pins), `workers.json` (enrolled workers, hashed credentials), `classes.json` | **Losing `workers/tls/key.pem` means re-enrolling every worker**: their pin no longer matches. Losing `workers.json` revokes every worker. Back up this volume. |
+| `gso-router-state` | `tls/` (control TLS), **`workers/tls/key.pem`** (the key every worker pins), `workers.json` (enrolled workers, hashed credentials) | **Losing `workers/tls/key.pem` means re-enrolling every worker**: their pin no longer matches. Losing `workers.json` revokes every worker. Back up this volume. |
 | `gso-worker-state` | the worker credential (0600), the router pin, `runners.json` | Re-enroll this worker (`gso workers revoke unraid`, then `add` again). |
 
 Runner state survives restarts: jobs running when you update or restart either container keep running and are re-attached.
@@ -193,10 +193,10 @@ Set these stack variables, then redeploy:
 | Variable | Value | Why |
 |---|---|---|
 | `COMPOSE_PROFILES` | `sim` | Starts the `gso-sim` service (or `docker compose --profile sim up -d`). |
-| `GSO_GITHUB_SIM` | `http://gso-sim:9300` | The router reaches the simulator over the compose network. `GITHUB_TOKEN` can stay empty. |
-| `GSO_SIM_ADVERTISE` | `http://172.17.0.1:9300` | What job containers dial, and the host the worker trusts in job configs. The worker needs it as a flag (`--github-sim`); the compose file passes it. A docker-executor worker ignores `GSO_GITHUB_SIM` in its environment. |
+| `GSO_GITHUB_SIM` | `http://172.17.0.1:9300` | The router's simulator URL. `GITHUB_TOKEN` can stay empty. |
+| `GSO_SIM_ADVERTISE` | `http://172.17.0.1:9300` | What job containers dial, and the host the worker trusts in job configs. The worker needs it as a flag (`--github-sim`); the compose file passes it. A docker-executor worker ignores `GSO_GITHUB_SIM` in its environment. **Clear it after the dry run**: while it stays set, the production worker keeps trusting that host in job configs. |
 
-The simulator speaks plain HTTP with no authentication, so the compose file publishes port 9300 only on the Docker bridge gateway (`172.17.0.1`, reachable by job containers, not by your LAN). If your default bridge uses another subnet, set `GSO_SIM_HOST` to its gateway address and change `GSO_SIM_ADVERTISE` to match. Never publish it on `0.0.0.0`. Inject jobs from the Unraid shell, for example `docker exec gso-sim gso sim job --sim http://127.0.0.1:9300 --repo youruser/repo-a --duration 20s`. Enroll the worker as in step 5 first. Remove the three variables and the profile when you are done.
+All three use the same address: the Docker bridge gateway (`172.17.0.1` on a default Unraid). Job containers, the router and the worker all reach the simulator there. The `gso-sim` service runs on the host network and listens **only** on that address (`GSO_SIM_HOST`, default `172.17.0.1`), never on `0.0.0.0`, because the simulator speaks plain HTTP with no authentication; your LAN cannot reach it. If your default bridge uses another gateway, set `GSO_SIM_HOST`, `GSO_GITHUB_SIM` and `GSO_SIM_ADVERTISE` to it together. Enroll the worker as in step 5 first, then inject jobs from the Unraid shell, for example `docker exec gso-sim gso sim job --sim http://172.17.0.1:9300 --repo youruser/repo-a --duration 20s`. When you are done, remove `COMPOSE_PROFILES`, `GSO_GITHUB_SIM` and `GSO_SIM_ADVERTISE` and redeploy.
 
 ## Upgrading from the single-container deployment
 

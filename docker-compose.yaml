@@ -15,9 +15,11 @@
 #
 # Simulator dry run (all three, plus the profile; see docs/unraid-portainer.md):
 #   COMPOSE_PROFILES=sim
-#   GSO_GITHUB_SIM=http://gso-sim:9300             router -> simulator (compose network)
-#   GSO_SIM_ADVERTISE=http://172.17.0.1:9300       what job containers and the worker use
-#   GSO_SIM_HOST=172.17.0.1                        optional; the address the simulator port binds to
+#   GSO_GITHUB_SIM=http://172.17.0.1:9300          the router's simulator URL
+#   GSO_SIM_ADVERTISE=http://172.17.0.1:9300       what job containers dial; the worker trusts it
+#   GSO_SIM_HOST=172.17.0.1                        optional; the only address the simulator listens on
+# All three name the same address (the Docker bridge gateway). Clear
+# GSO_GITHUB_SIM and GSO_SIM_ADVERTISE after the dry run.
 #
 # Bootstrap, once:
 #   1. Deploy with GSO_WORKER_JOIN empty. The router starts; the worker exits
@@ -38,12 +40,21 @@ services:
       GSO_WORKERS_LISTEN: ":9200"
       GSO_WORKERS_ADVERTISE: ${GSO_WORKERS_ADVERTISE:?set GSO_WORKERS_ADVERTISE to host:port workers dial}
       # Narrow this to your LAN /24 plus the compose network (Docker uses 172.16.0.0/12).
-      GSO_WORKERS_ALLOW_CIDRS: ${GSO_WORKERS_ALLOW_CIDRS:-192.168.0.0/16,172.16.0.0/12}
+      # The default matches gso's own: RFC1918, CGNAT, loopback.
+      GSO_WORKERS_ALLOW_CIDRS: ${GSO_WORKERS_ALLOW_CIDRS:-10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,100.64.0.0/10,127.0.0.0/8}
       # Empty (ignored) unless you run the `sim` profile.
       GSO_GITHUB_SIM: ${GSO_GITHUB_SIM:-}
     volumes:
-      - ./config.yaml:/etc/gso/config.yaml:ro
-      - gso-router-state:/home/runner/.config/gso   # TLS key, workers.json, classes.json
+      # create_host_path: false makes a missing ./config.yaml an error. With the
+      # short syntax Docker would create a directory there and the router would
+      # crash-loop.
+      - type: bind
+        source: ./config.yaml
+        target: /etc/gso/config.yaml
+        read_only: true
+        bind:
+          create_host_path: false
+      - gso-router-state:/home/runner/.config/gso   # TLS key, workers.json
     ports:
       - "9200:9200"
     restart: unless-stopped
@@ -75,17 +86,18 @@ services:
 
   # Optional GitHub simulator for a dry run (docs/simulator.md). Start it with
   # `docker compose --profile sim up -d` (Portainer: stack variable COMPOSE_PROFILES=sim).
-  # Plain HTTP, no auth: never expose it beyond a trusted network. The port is
-  # published only on the Docker bridge gateway (172.17.0.1 by default), which
-  # job containers on the default bridge can reach and the LAN cannot. The
-  # router and worker reach it by compose name or that address.
+  # Plain HTTP, no auth: never expose it beyond a trusted network. It runs on
+  # the host network and listens ONLY on the Docker bridge gateway address
+  # (172.17.0.1 by default), never on 0.0.0.0. Job containers, the router and
+  # the worker all use that one address, so no traffic has to cross between
+  # Docker bridges (which Docker's isolation rules can drop). The LAN cannot
+  # reach it.
   gso-sim:
     image: ghcr.io/aboldnewlook/github-scaleset-orchestrator:${GSO_TAG:?set GSO_TAG to a gso release tag}
     container_name: gso-sim
     profiles: ["sim"]
-    command: ["sim", "serve", "--listen", ":9300", "--advertise", "${GSO_SIM_ADVERTISE:-http://172.17.0.1:9300}"]
-    ports:
-      - "${GSO_SIM_HOST:-172.17.0.1}:9300:9300"
+    network_mode: host
+    command: ["sim", "serve", "--listen", "${GSO_SIM_HOST:-172.17.0.1}:9300", "--advertise", "${GSO_SIM_ADVERTISE:-http://172.17.0.1:9300}"]
     restart: unless-stopped
 
 volumes:

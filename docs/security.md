@@ -127,15 +127,15 @@ A router (`gso start` with `workers.listen`) places jobs on enrolled workers (`g
 
 Anyone can open a pull request against a public repository, so its workflow code is untrusted. The router therefore:
 
-- serves public repositories only when `public.allow` (or the repository's `allow_public`) is true; the default is off;
-- reads each repository's visibility (`GET /repos/{owner}/{repo}`) **before** creating its scale set, and **does not start that repository's listener** when the token cannot read it (fail closed). The token needs read access to the repository's metadata;
-- offers a public repository's jobs **only to workers that opted in** (`--accept-public accept`, or `follow` with `public.worker_default_accept: true`), and **forces the job cache off** for them.
+- reads each repository's visibility (`GET /repos/{owner}/{repo}`) **before** creating its scale set, retrying on failure, and **does not start that repository's listener** while it cannot read it (fail closed). The token needs read access to the repository's metadata;
+- offers a public repository's jobs to a remote worker **only if that worker opted in** with `--accept-public accept`;
+- **forces the job cache off** for public jobs.
 
-Opt in public repositories only on workers that are disposable or isolated from your LAN. `public.fork_cancel` can additionally cancel runs from forks.
+The router's own local member (a router with `max_runners` above 0) currently accepts public repositories. Router-level `public.*` settings are not available yet. Opt in public repositories only on workers that are disposable or isolated from your LAN.
 
 ### Simulator
 
-`gso sim serve` binds `:9300` on all interfaces and has **no authentication** and no TLS. Anything that can reach it can inject jobs and read what the router sends. Never expose it beyond a trusted network: publish it on loopback or an internal network only (the compose `sim` profile binds it to the Docker bridge gateway). It is for testing; see [simulator.md](simulator.md).
+`gso sim serve` binds `:9300` on all interfaces and has **no authentication** and no TLS. Anything that can reach it can inject jobs and read what the router sends. Never expose it beyond a trusted network: bind it to loopback or one internal address only (the compose `sim` profile runs it on the host network, listening only on the Docker bridge gateway address). It is for testing; see [simulator.md](simulator.md).
 
 ## Network Model
 
@@ -163,12 +163,13 @@ Setting `workers.listen` (e.g. `:9200`) opens **one** inbound port. It carries t
 
 #### Docker published ports and the allowlist
 
-The allowlist is only as good as the source address the router sees. When Docker publishes a port through its **userland proxy** (`docker-proxy`), the router sees the proxy's connection, not the real client: every peer then appears to come from the Docker bridge gateway (an address in `172.16.0.0/12`, such as `172.17.0.1`). Because the compose network range is normally allowed, **the allowlist then filters nothing**, and anyone who can reach the port passes it. The remaining defences (TLS pin, per-worker credential, enrollment rate limit) still hold, but you have lost the network layer.
+The allowlist is only as good as the source address the router sees. When Docker publishes a port through its **userland proxy** (`docker-proxy`), the router sees the proxy's connection, not the real client: every peer then appears to come from the Docker bridge gateway (an address in `172.16.0.0/12`, such as the compose network's gateway, e.g. `172.18.0.1`). Because the compose network range is normally allowed, **the allowlist then filters nothing**, and anyone who can reach the port passes it. The remaining defences (TLS pin, per-worker credential, enrollment rate limit) still hold, but you have lost the network layer.
 
-The userland proxy is used when `iptables` NAT is off (`"iptables": false`), for some IPv6 and hairpin paths, or when `"userland-proxy": true` is forced on a host without working DNAT. The default (iptables DNAT, `userland-proxy` unused for IPv4) preserves the client address.
+On the normal path, an `iptables` DNAT rule forwards the published port and the router sees the real client address. The proxy relays connections instead (and hides the client) on paths where DNAT does not apply, for example with Docker's `iptables` support turned off or on some loopback, hairpin and IPv6 paths. Whether your host is affected depends on its Docker configuration, so verify it rather than assume.
 
 - **Prefer the default iptables DNAT**, or give the router **host networking** (`network_mode: host`, then `workers.listen` binds on the host and sees real peers).
-- **Check it.** Enroll a worker from a *different* machine on your LAN, then read the router log: the `worker enrolled` line carries `remote=<address>`, and that must be the machine's LAN address, not the bridge gateway (`172.17.0.1` or similar). A `remote` in `172.16.0.0/12` for a peer that is not on the compose network means the proxy is in use. Also run `ps aux | grep docker-proxy` on the host; a `docker-proxy` process for port `9200` points to the same thing. As a negative test, connect from a machine **outside** your allowlist (for example a phone on mobile data, or a host on another VLAN, with `nc -vz unraid.lan 9200`): the connection must be closed before any TLS handshake, and if it completes a handshake the allowlist is not filtering.
+- **Check it, positive.** Enroll a worker from a *different* machine on your LAN, then read the router log: the `worker enrolled` line carries `remote=<address>`, and that must be the machine's LAN address. If `remote` is the compose network's gateway (an address in `172.16.0.0/12`) for a peer that is not on the compose network, the source address is being hidden.
+- **Check it, negative.** From a host **outside** your allowlist (another VLAN, or a phone on mobile data), run `openssl s_client -connect <host>:9200 -tls1_3`. If the allowlist works, the connection is closed before the TLS handshake and `openssl` reports an error without a certificate. If it prints the router's certificate, the allowlist is not filtering.
 - If you cannot preserve source addresses, treat the port as unfiltered: restrict it with the host firewall (Unraid: do not forward it, bind it to the LAN interface) and rely on enrollment bounds and revocation.
 
 ### DNS

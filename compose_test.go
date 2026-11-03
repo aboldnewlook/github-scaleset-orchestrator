@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -24,11 +25,18 @@ func readCompose(t *testing.T) *viper.Viper {
 	return v
 }
 
+// volumeEntries returns a service's volumes, each as written: a short-syntax
+// string or a long-syntax map.
+func volumeEntries(v *viper.Viper, service string) []any {
+	entries, _ := v.Get("services." + service + ".volumes").([]any)
+	return entries
+}
+
 func TestComposeRouterHasNoDockerSocket(t *testing.T) {
 	v := readCompose(t)
-	for _, vol := range v.GetStringSlice("services.gso-router.volumes") {
-		if strings.Contains(vol, "docker.sock") {
-			t.Fatalf("router mounts the Docker socket: %q", vol)
+	for _, vol := range volumeEntries(v, "gso-router") {
+		if s := fmt.Sprint(vol); strings.Contains(s, "docker.sock") {
+			t.Fatalf("router mounts the Docker socket: %q", s)
 		}
 	}
 	env := v.GetStringMapString("services.gso-router.environment")
@@ -50,8 +58,32 @@ func TestComposeRouterLoadsTheMountedConfig(t *testing.T) {
 	if i < 0 || i+1 >= len(cmd) || cmd[i+1] != "/etc/gso/config.yaml" {
 		t.Fatalf("router command = %q, want it to pass --config /etc/gso/config.yaml", cmd)
 	}
-	if !slices.Contains(v.GetStringSlice("services.gso-router.volumes"), "./config.yaml:/etc/gso/config.yaml:ro") {
-		t.Fatal("router does not mount ./config.yaml at /etc/gso/config.yaml")
+	// Long syntax with create_host_path: false, so a missing ./config.yaml is an
+	// error instead of Docker silently creating a directory at that path.
+	found := false
+	for _, vol := range volumeEntries(v, "gso-router") {
+		m, ok := vol.(map[string]any)
+		if !ok || m["target"] != "/etc/gso/config.yaml" {
+			continue
+		}
+		found = true
+		if m["type"] != "bind" || m["source"] != "./config.yaml" || m["read_only"] != true {
+			t.Fatalf("config mount = %v, want a read-only bind of ./config.yaml", m)
+		}
+		bind, _ := m["bind"].(map[string]any)
+		if bind["create_host_path"] != false {
+			t.Fatalf("config mount bind = %v, want create_host_path: false", bind)
+		}
+	}
+	if !found {
+		t.Fatal("router does not mount a config at /etc/gso/config.yaml")
+	}
+	env := v.GetStringMapString("services.gso-router.environment")
+	if got := env["gso_github_sim"]; got != "${GSO_GITHUB_SIM:-}" {
+		t.Fatalf("router GSO_GITHUB_SIM = %q, want ${GSO_GITHUB_SIM:-} (empty outside the sim profile)", got)
+	}
+	if got := env["gso_workers_allow_cidrs"]; !strings.Contains(got, "10.0.0.0/8") {
+		t.Fatalf("router GSO_WORKERS_ALLOW_CIDRS default = %q, want it to include 10.0.0.0/8 like the code default", got)
 	}
 }
 
@@ -110,17 +142,28 @@ func TestComposeSimulatorIsOptInAndStateless(t *testing.T) {
 	}
 }
 
-// The simulator is unauthenticated plain HTTP: it must never be published on
-// every interface.
-func TestComposeSimulatorIsNotPublishedOnAllInterfaces(t *testing.T) {
+// The simulator is unauthenticated plain HTTP: it must never listen on every
+// interface. It runs on the host network (so job containers, the router and
+// the worker all reach one address without crossing Docker bridges) and binds
+// only the bridge gateway address.
+func TestComposeSimulatorListensOnOneAddressOnly(t *testing.T) {
 	v := readCompose(t)
-	ports := v.GetStringSlice("services.gso-sim.ports")
-	if len(ports) == 0 {
-		t.Fatal("gso-sim publishes no port; job containers could not reach it")
+	if got := v.GetString("services.gso-sim.network_mode"); got != "host" {
+		t.Fatalf("gso-sim network_mode = %q, want host", got)
 	}
-	for _, p := range ports {
-		if strings.HasPrefix(p, "9300:") || strings.HasPrefix(p, ":") || strings.HasPrefix(p, "0.0.0.0:") {
-			t.Fatalf("gso-sim port %q binds every interface; bind a specific address", p)
-		}
+	if ports := v.GetStringSlice("services.gso-sim.ports"); len(ports) != 0 {
+		t.Fatalf("gso-sim ports = %q, want none (host network)", ports)
+	}
+	cmd := v.GetStringSlice("services.gso-sim.command")
+	i := slices.Index(cmd, "--listen")
+	if i < 0 || i+1 >= len(cmd) {
+		t.Fatalf("gso-sim command = %q, want --listen", cmd)
+	}
+	if got, want := cmd[i+1], "${GSO_SIM_HOST:-172.17.0.1}:9300"; got != want {
+		t.Fatalf("gso-sim --listen = %q, want %q (never :9300 or 0.0.0.0)", got, want)
+	}
+	j := slices.Index(cmd, "--advertise")
+	if j < 0 || j+1 >= len(cmd) || cmd[j+1] != "${GSO_SIM_ADVERTISE:-http://172.17.0.1:9300}" {
+		t.Fatalf("gso-sim command = %q, want --advertise ${GSO_SIM_ADVERTISE:-http://172.17.0.1:9300}", cmd)
 	}
 }
