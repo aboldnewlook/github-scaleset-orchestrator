@@ -6,32 +6,33 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"runtime"
-	"strings"
 	"sync"
 	"time"
 
-	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/buildinfo"
 	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/config"
+	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/control"
 	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/event"
+	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/ghapi"
 	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/naming"
 	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/scaler"
-	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/service"
 	"github.com/aboldnewlook/github-scaleset-orchestrator/runner"
-	"github.com/actions/scaleset"
-	"github.com/actions/scaleset/listener"
 )
 
-// Orchestrator manages scale sets and listeners for multiple repos.
+// Orchestrator supervises one GitHub scale-set listener per repo.
 type Orchestrator struct {
-	cfg    *config.Config
-	logger *slog.Logger
-	bus    *event.Bus // may be nil
-	sem    *scaler.Semaphore
+	cfg      *config.Config
+	logger   *slog.Logger
+	bus      *event.Bus // may be nil
+	sem      *scaler.Semaphore
+	github   ghapi.Factory
+	timing   SupervisorTiming
+	instance string       // naming.InstanceID(cfg.Runner.InstanceID): scale-set names and session owner
+	class    runner.Class // P2a: the router host's class only
 
 	mu        sync.Mutex
-	scalers   map[string]*scaler.Scaler // keyed by repo name
-	listeners map[string]capacitySetter
+	scalers   map[string]*scaler.Scaler // keyed by repo; live across listener restarts
+	listeners map[string]capacitySetter // keyed by repo; only while a listener runs
+	status    map[string]*control.ListenerLiveStatus
 }
 
 // capacitySetter is implemented by the scale-set listener. Keeping only its
@@ -40,14 +41,38 @@ type capacitySetter interface {
 	SetMaxRunners(int)
 }
 
-func New(cfg *config.Config, logger *slog.Logger, bus *event.Bus) *Orchestrator {
-	return &Orchestrator{
+// Option configures an Orchestrator.
+type Option func(*Orchestrator)
+
+// WithGitHub replaces the per-repo GitHub client factory (the simulator, tests).
+// An injected factory owns authentication: the orchestrator never resolves a
+// token or builds a real scaleset client itself.
+func WithGitHub(f ghapi.Factory) Option { return func(o *Orchestrator) { o.github = f } }
+
+// WithSupervisorTiming replaces the listener supervisor's retry policy.
+func WithSupervisorTiming(t SupervisorTiming) Option {
+	return func(o *Orchestrator) { o.timing = t }
+}
+
+func New(cfg *config.Config, logger *slog.Logger, bus *event.Bus, opts ...Option) *Orchestrator {
+	o := &Orchestrator{
 		cfg:       cfg,
 		logger:    logger,
 		bus:       bus,
+		timing:    DefaultSupervisorTiming(),
+		instance:  naming.InstanceID(cfg.Runner.InstanceID),
+		class:     cfg.DefaultClass(),
 		scalers:   make(map[string]*scaler.Scaler),
 		listeners: make(map[string]capacitySetter),
+		status:    make(map[string]*control.ListenerLiveStatus),
 	}
+	for _, opt := range opts {
+		opt(o)
+	}
+	if o.github == nil {
+		o.github = ghapi.NewFactory(cfg, ghapi.NewHTTPClient(), logger)
+	}
+	return o
 }
 
 // RunnersByRepo returns a snapshot of active runner names per repo.
@@ -132,19 +157,40 @@ func (o *Orchestrator) Scalers() map[string]*scaler.Scaler {
 	return cp
 }
 
-// Run starts listeners for all configured repos and blocks until ctx is cancelled.
+// Run supervises one listener per configured repo and blocks until ctx is
+// cancelled. One repo's failures never stop the others (design spec §5.3),
+// so Run returns an error only when the local executor cannot be prepared.
 func (o *Orchestrator) Run(ctx context.Context) error {
-	o.publish(event.Event{
-		Time: time.Now(),
-		Type: event.EventDaemonStarted,
-	})
+	o.publish(event.Event{Time: time.Now(), Type: event.EventDaemonStarted})
 
-	hostname, _ := os.Hostname()
-	if hostname == "" {
-		hostname = "unknown"
+	worker, err := o.prepareExecutor(ctx)
+	if err != nil {
+		return err
 	}
 
-	var worker runner.Executor
+	o.mu.Lock()
+	o.sem = scaler.NewSemaphore(o.cfg.MaxRunners)
+	sem := o.sem
+	o.mu.Unlock()
+
+	var wg sync.WaitGroup
+	for _, repo := range o.cfg.Repos {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			o.superviseRepo(ctx, repo, worker, sem)
+		}()
+	}
+
+	<-ctx.Done()
+	o.publish(event.Event{Time: time.Now(), Type: event.EventDaemonStopping})
+	wg.Wait()
+	return nil
+}
+
+// prepareExecutor builds the single local executor. The code moved from
+// Run unchanged; B8a moves it into internal/router.
+func (o *Orchestrator) prepareExecutor(ctx context.Context) (runner.Executor, error) {
 	if o.cfg.Runner.Executor == "docker" {
 		dockerWorker, err := runner.NewDockerWorker(runner.DockerConfig{
 			Image:      o.cfg.Runner.Image,
@@ -157,199 +203,49 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 			Host:       o.cfg.Runner.DockerHost,
 		}, o.logger)
 		if err != nil {
-			return fmt.Errorf("configuring docker executor: %w", err)
+			return nil, fmt.Errorf("configuring docker executor: %w", err)
 		}
 		if err := dockerWorker.Reconcile(ctx); err != nil {
-			return fmt.Errorf("reconciling stale runner containers: %w", err)
+			return nil, fmt.Errorf("reconciling stale runner containers: %w", err)
 		}
-		worker = dockerWorker
-	} else {
-		cacheDir, err := os.UserCacheDir()
-		if err != nil {
-			cacheDir = "/tmp"
-		}
-		cacheDir += "/gso"
-		mgr, err := runner.NewManager(cacheDir, o.logger)
-		if err != nil {
-			return fmt.Errorf("creating runner manager: %w", err)
-		}
-		runnerDir, err := mgr.RunnerDir(ctx)
-		if err != nil {
-			return fmt.Errorf("preparing runner binary: %w", err)
-		}
-		o.logger.Info("runner binary ready", "dir", runnerDir)
-		worker = runner.NewWorker(runnerDir, o.logger)
+		return dockerWorker, nil
 	}
-
-	o.mu.Lock()
-	o.sem = scaler.NewSemaphore(o.cfg.MaxRunners)
-	sem := o.sem
-	o.mu.Unlock()
-
-	var wg sync.WaitGroup
-	errCh := make(chan error, len(o.cfg.Repos))
-
-	for _, repo := range o.cfg.Repos {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if err := o.runRepo(ctx, repo, hostname, worker, sem); err != nil {
-				o.logger.Error("repo listener failed", "repo", repo.Name, "error", err)
-				errCh <- fmt.Errorf("%s: %w", repo.Name, err)
-			}
-		}()
+	cacheDir, err := os.UserCacheDir()
+	if err != nil {
+		cacheDir = "/tmp"
 	}
-
-	// Wait for context cancellation in a separate goroutine so we can
-	// emit the stopping event.
-	go func() {
-		<-ctx.Done()
-		o.publish(event.Event{
-			Time: time.Now(),
-			Type: event.EventDaemonStopping,
-		})
-	}()
-
-	wg.Wait()
-	close(errCh)
-
-	// Return first error if any
-	for err := range errCh {
-		return err
+	cacheDir += "/gso"
+	mgr, err := runner.NewManager(cacheDir, o.logger)
+	if err != nil {
+		return nil, fmt.Errorf("creating runner manager: %w", err)
 	}
-	return nil
+	runnerDir, err := mgr.RunnerDir(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("preparing runner binary: %w", err)
+	}
+	o.logger.Info("runner binary ready", "dir", runnerDir)
+	return runner.NewWorker(runnerDir, o.logger), nil
 }
 
-func (o *Orchestrator) runRepo(ctx context.Context, repo config.Repo, hostname string, worker runner.Executor, sem *scaler.Semaphore) error {
-	logger := o.logger.With("repo", repo.Name)
-	logger.Info("starting listener")
-
-	client, err := service.NewScaleSetClient(ctx, o.cfg, repo, logger)
-	if err != nil {
-		return fmt.Errorf("creating client: %w", err)
-	}
-
-	// Build labels
-	labels := make([]scaleset.Label, 0, len(o.cfg.Labels)+2)
-	for _, l := range o.cfg.Labels {
-		labels = append(labels, scaleset.Label{Name: l})
-	}
-	labels = append(labels, scaleset.Label{Name: osLabel()})
-	labels = append(labels, scaleset.Label{Name: archLabel()})
-
-	// Create or get scale set
-	scaleSetName := naming.ScaleSetName(naming.ScaleSetNamePrefix, hostname, repo.Name)
-
-	ss, err := client.GetRunnerScaleSet(ctx, 1, scaleSetName)
-	if err != nil || ss == nil {
-		logger.Info("creating new scale set", "name", scaleSetName)
-		ss, err = client.CreateRunnerScaleSet(ctx, &scaleset.RunnerScaleSet{
-			Name:          scaleSetName,
-			RunnerGroupID: 1,
-			Labels:        labels,
-			RunnerSetting: scaleset.RunnerSetting{
-				DisableUpdate: true,
-			},
-		})
-		if err != nil {
-			return fmt.Errorf("creating scale set: %w", err)
-		}
-	}
-
-	logger.Info("scale set ready", "id", ss.ID, "name", ss.Name)
-
-	o.publish(event.Event{
-		Time: time.Now(),
-		Type: event.EventScaleSetCreated,
-		Repo: repo.Name,
-		Payload: mustMarshal(map[string]any{
-			"id":   ss.ID,
-			"name": ss.Name,
-		}),
-	})
-
-	sysInfo := scaleset.SystemInfo{
-		System:     "gso",
-		Version:    buildinfo.Version,
-		Subsystem:  "orchestrator",
-		ScaleSetID: ss.ID,
-	}
-	client.SetSystemInfo(sysInfo)
-
-	sessionClient, err := client.MessageSessionClient(ctx, ss.ID, hostname)
-	if err != nil {
-		// Handle stale session from a previous crash — delete and recreate the scale set
-		if strings.Contains(err.Error(), "409") || strings.Contains(err.Error(), "Conflict") {
-			logger.Warn("stale session detected, recreating scale set")
-			if delErr := client.DeleteRunnerScaleSet(ctx, ss.ID); delErr != nil {
-				return fmt.Errorf("deleting stale scale set: %w", delErr)
-			}
-			ss, err = client.CreateRunnerScaleSet(ctx, &scaleset.RunnerScaleSet{
-				Name:          scaleSetName,
-				RunnerGroupID: 1,
-				Labels:        labels,
-				RunnerSetting: scaleset.RunnerSetting{
-					DisableUpdate: true,
-				},
-			})
-			if err != nil {
-				return fmt.Errorf("recreating scale set: %w", err)
-			}
-			logger.Info("scale set recreated", "id", ss.ID, "name", ss.Name)
-			sysInfo.ScaleSetID = ss.ID
-			client.SetSystemInfo(sysInfo)
-
-			sessionClient, err = client.MessageSessionClient(ctx, ss.ID, hostname)
-			if err != nil {
-				return fmt.Errorf("creating session client after recreation: %w", err)
-			}
-		} else {
-			return fmt.Errorf("creating session client: %w", err)
-		}
-	}
-	defer func() { _ = sessionClient.Close(ctx) }()
-
-	repoWorker := worker
-	if dockerWorker, ok := worker.(*runner.DockerWorker); ok {
-		cacheMode := o.cfg.Runner.Cache
-		if repo.RunnerCache != "" {
-			cacheMode = repo.RunnerCache
-		}
-		repoWorker = dockerWorker.ForRepo(repo.Name, cacheMode)
-	}
-	s := scaler.New(repo.Name, ss.ID, client, repoWorker, sem, logger, o.bus)
-
+// registerScaler records the repo's scaler once; it stays registered across
+// listener restarts so RunnersByRepo and CancelRunner keep seeing its runners.
+func (o *Orchestrator) registerScaler(repo string, s *scaler.Scaler) {
 	o.mu.Lock()
-	maxRunners := o.cfg.MaxRunners
-	o.mu.Unlock()
-	l, err := listener.New(sessionClient, listener.Config{
-		ScaleSetID: ss.ID,
-		MaxRunners: maxRunners,
-		Logger:     logger,
-	})
-	if err != nil {
-		return fmt.Errorf("creating listener: %w", err)
-	}
-
-	o.registerListener(repo.Name, s, l)
-	defer o.unregisterListener(repo.Name)
-
-	return l.Run(ctx, s)
+	defer o.mu.Unlock()
+	o.scalers[repo] = s
 }
 
-func (o *Orchestrator) registerListener(repo string, s *scaler.Scaler, l capacitySetter) {
+func (o *Orchestrator) registerListener(repo string, l capacitySetter) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	// Capacity may have changed while the listener was being created.
 	l.SetMaxRunners(o.cfg.MaxRunners)
-	o.scalers[repo] = s
 	o.listeners[repo] = l
 }
 
 func (o *Orchestrator) unregisterListener(repo string) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	delete(o.scalers, repo)
 	delete(o.listeners, repo)
 }
 
@@ -363,28 +259,4 @@ func (o *Orchestrator) publish(e event.Event) {
 func mustMarshal(v any) json.RawMessage {
 	data, _ := json.Marshal(v)
 	return data
-}
-
-func osLabel() string {
-	switch runtime.GOOS {
-	case "darwin":
-		return "macOS"
-	case "linux":
-		return "Linux"
-	case "windows":
-		return "Windows"
-	default:
-		return runtime.GOOS
-	}
-}
-
-func archLabel() string {
-	switch runtime.GOARCH {
-	case "amd64":
-		return "X64"
-	case "arm64":
-		return "ARM64"
-	default:
-		return runtime.GOARCH
-	}
 }

@@ -48,12 +48,28 @@ type LiveStatusResult struct {
 	MaxRunners int                `json:"max_runners"`
 	Available  int                `json:"available"`
 	Workers    []WorkerLiveStatus `json:"workers,omitempty"`
+	// Listeners is not gated by transport: it carries repo names and scale-set
+	// names only, no worker identity.
+	Listeners []ListenerLiveStatus `json:"listeners,omitempty"`
 }
 
 // RepoLiveStatus describes the runners for a single repo.
 type RepoLiveStatus struct {
 	Repo    string   `json:"repo"`
 	Runners []string `json:"runners"`
+}
+
+// ListenerLiveStatus describes one supervised scale-set listener
+// (design spec §5.3).
+type ListenerLiveStatus struct {
+	Repo         string `json:"repo"`
+	Class        string `json:"class"`
+	ScaleSetID   int    `json:"scale_set_id"`
+	ScaleSetName string `json:"scale_set_name"`
+	State        string `json:"state"` // "running" | "retrying" | "degraded"
+	Failures     int    `json:"failures,omitempty"`
+	LastError    string `json:"last_error,omitempty"`
+	Capacity     int    `json:"capacity"`
 }
 
 // Worker administration methods. They are served only on the local unix

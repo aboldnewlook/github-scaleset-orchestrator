@@ -20,6 +20,13 @@ type OrchestratorState interface {
 	CancelRunner(name string) bool
 }
 
+// ListenerReporter is implemented by an OrchestratorState that can report its
+// GitHub listeners: the orchestrator, and the router, which delegates to it.
+// It is separate from OrchestratorState so implementers opt in.
+type ListenerReporter interface {
+	Listeners() []control.ListenerLiveStatus
+}
+
 // Runtime wraps orchestrator live state and implements control.Handler.
 type Runtime struct {
 	orch       OrchestratorState
@@ -119,6 +126,9 @@ func (r *Runtime) LiveStatus(ctx context.Context) (*control.LiveStatusResult, er
 	// Worker names and IDs are unix-socket-only, like workers_list.
 	if admin, ok := r.orch.(WorkerAdmin); ok && control.IsUnixSocket(ctx) {
 		result.Workers = admin.ListWorkers()
+	}
+	if lr, ok := r.orch.(ListenerReporter); ok {
+		result.Listeners = lr.Listeners()
 	}
 	return result, nil
 }

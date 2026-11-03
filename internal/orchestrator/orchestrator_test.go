@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"os"
 	"reflect"
-	"runtime"
 	"testing"
 	"time"
 
@@ -124,13 +123,13 @@ func TestSetMaxRunnersUpdatesActiveAndLateListeners(t *testing.T) {
 	o := New(&config.Config{MaxRunners: 4}, testLogger(), nil)
 	o.sem = scaler.NewSemaphore(4)
 	first := &recordingCapacitySetter{}
-	o.registerListener("org/first", nil, first)
+	o.registerListener("org/first", first)
 
 	if err := o.SetMaxRunners(8); err != nil {
 		t.Fatal(err)
 	}
 	second := &recordingCapacitySetter{}
-	o.registerListener("org/second", nil, second)
+	o.registerListener("org/second", second)
 	if err := o.SetMaxRunners(2); err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +205,7 @@ func TestSetMaxRunnersChangesAdvertisedCapacityOnNextPoll(t *testing.T) {
 	}
 	o := New(&config.Config{MaxRunners: 4}, testLogger(), nil)
 	o.sem = scaler.NewSemaphore(4)
-	o.registerListener("org/repo", nil, l)
+	o.registerListener("org/repo", l)
 	defer o.unregisterListener("org/repo")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -335,46 +334,6 @@ func TestRepoShortName(t *testing.T) {
 				t.Fatalf("RepoShortName(%q) = %q, want %q", tt.input, got, tt.want)
 			}
 		})
-	}
-}
-
-func TestOsLabel(t *testing.T) {
-	label := osLabel()
-	switch runtime.GOOS {
-	case "darwin":
-		if label != "macOS" {
-			t.Fatalf("osLabel() = %q, want macOS", label)
-		}
-	case "linux":
-		if label != "Linux" {
-			t.Fatalf("osLabel() = %q, want Linux", label)
-		}
-	case "windows":
-		if label != "Windows" {
-			t.Fatalf("osLabel() = %q, want Windows", label)
-		}
-	default:
-		if label != runtime.GOOS {
-			t.Fatalf("osLabel() = %q, want %q", label, runtime.GOOS)
-		}
-	}
-}
-
-func TestArchLabel(t *testing.T) {
-	label := archLabel()
-	switch runtime.GOARCH {
-	case "amd64":
-		if label != "X64" {
-			t.Fatalf("archLabel() = %q, want X64", label)
-		}
-	case "arm64":
-		if label != "ARM64" {
-			t.Fatalf("archLabel() = %q, want ARM64", label)
-		}
-	default:
-		if label != runtime.GOARCH {
-			t.Fatalf("archLabel() = %q, want %q", label, runtime.GOARCH)
-		}
 	}
 }
 
