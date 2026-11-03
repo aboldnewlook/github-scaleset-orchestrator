@@ -160,35 +160,30 @@ func TestSettleIsPacedByTheHeartbeatInterval(t *testing.T) {
 	tf := newTestFleet(t)
 	tf.gh.setScaleSet("o/r", linuxX64, 7)
 	tf.gh.setGetErr(errors.New("github: 502"))
-	names := deferredNames(4)
-	w := testWorker("box", Bounds{Classes: []runner.Class{linuxX64}, MaxSlots: 4})
-	var states []*workerv1.RunnerState
-	for _, n := range names {
-		states = append(states, runningState(n, "o/r", linuxX64, running))
-	}
-	res := tf.open(t, w, dockerCaps(4, linuxX64), states...)
+	// 16 slots give a budget of 16 lookups, so only the pacing can hold this
+	// to one lookup: the budget alone would allow 16.
+	w := testWorker("box", Bounds{Classes: []runner.Class{linuxX64}, MaxSlots: 16})
+	res := tf.open(t, w, dockerCaps(16, linuxX64), runningState(deferredRunner, "o/r", linuxX64, running))
 	if len(res.RejectedRunners) != 0 {
 		t.Fatalf("rejected = %v", res.RejectedRunners)
 	}
-	base := tf.gh.getCalls() // OpenSession's own round: at most one lookup per runner
+	if got := tf.gh.getCalls(); got != 1 {
+		t.Fatalf("OpenSession made %d lookups, want 1", got)
+	}
 
 	for range 50 {
-		heartbeatRunning(t, tf, res.SessionID, w.ID, names...)
+		heartbeatRunning(t, tf, res.SessionID, w.ID, deferredRunner)
 	}
-	if got := tf.gh.getCalls(); got > 4*(0+1) {
-		t.Fatalf("%d lookups after 50 rapid heartbeats, want at most 4 (open made %d)", got, base)
+	if got := tf.gh.getCalls(); got > 1 {
+		t.Fatalf("%d lookups after 50 rapid heartbeats, want at most 1", got)
 	}
 
 	tf.clock.Advance(tf.o.Timing.Heartbeat)
 	for range 50 {
-		heartbeatRunning(t, tf, res.SessionID, w.ID, names...)
+		heartbeatRunning(t, tf, res.SessionID, w.ID, deferredRunner)
 	}
-	got := tf.gh.getCalls()
-	if got <= base {
-		t.Fatalf("no settle after the interval passed: %d lookups", got)
-	}
-	if got > 4*(1+1) {
-		t.Fatalf("%d lookups after one interval, want at most %d", got, 4*(1+1))
+	if got := tf.gh.getCalls(); got != 2 {
+		t.Fatalf("%d lookups after one interval, want exactly 2", got)
 	}
 }
 
@@ -211,15 +206,26 @@ func TestSettleSkipsWhileEveryScaleSetIsUnknown(t *testing.T) {
 // Concurrent heartbeats share one settle.
 func TestConcurrentHeartbeatsSettleOnce(t *testing.T) {
 	tf := newTestFleet(t)
-	w := testWorker("box", Bounds{Classes: []runner.Class{linuxX64}, MaxSlots: 1})
-	res := tf.open(t, w, dockerCaps(1, linuxX64), runningState(deferredRunner, "o/r", linuxX64, running))
+	// 16 slots: the budget would allow 16 lookups, so only single-flight can
+	// hold ten concurrent heartbeats to one.
+	w := testWorker("box", Bounds{Classes: []runner.Class{linuxX64}, MaxSlots: 16})
+	res := tf.open(t, w, dockerCaps(16, linuxX64), runningState(deferredRunner, "o/r", linuxX64, running))
 	tf.gh.setScaleSet("o/r", linuxX64, 7)
 	tf.gh.setGetErr(errors.New("github: 502"))
 	tf.gh.setGetDelay(200 * time.Millisecond) // keeps the first settle in flight
 	tf.clock.Advance(tf.o.Timing.Heartbeat)
 
 	var wg sync.WaitGroup
-	for range 10 {
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		heartbeatRunning(t, tf, res.SessionID, w.ID, deferredRunner)
+	}()
+	waitUntil(t, "the first settle to reach GitHub", func() bool { return tf.gh.getCalls() == 1 })
+	// The first settle is still in flight. Move the clock past the pacing
+	// interval so only single-flight can stop the others.
+	tf.clock.Advance(tf.o.Timing.Heartbeat)
+	for range 9 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -229,6 +235,17 @@ func TestConcurrentHeartbeatsSettleOnce(t *testing.T) {
 	wg.Wait()
 	if n := tf.gh.getCalls(); n != 1 {
 		t.Fatalf("%d lookups from 10 concurrent heartbeats, want 1", n)
+	}
+}
+
+func waitUntil(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 
@@ -286,30 +303,61 @@ func TestLookupBudgetSurvivesSessionCycling(t *testing.T) {
 	}
 }
 
-// A runner whose lookups keep failing is cancelled after maxDeferAttempts.
-func TestRepeatedLookupFailuresCancelTheRunner(t *testing.T) {
+// Lookup errors are GitHub-wide (5xx, 429, an expired token), not a verdict on
+// the runner: however many fail, the job's runner stays deferred and running.
+// The budget bounds the cost; the hold cap bounds the time.
+func TestRepeatedLookupFailuresNeverCancelTheRunner(t *testing.T) {
 	tf := newTestFleet(t)
 	tf.gh.setScaleSet("o/r", linuxX64, 7)
-	tf.gh.setGetErr(errors.New("github: 414 URI too long"))
+	tf.gh.setGetErr(errors.New("github: 503"))
 	w := testWorker("box", Bounds{Classes: []runner.Class{linuxX64}, MaxSlots: 1})
 	req := PlacementRequest{Repo: "o/r", Class: linuxX64}
-	res := tf.open(t, w, dockerCaps(1, linuxX64), runningState(deferredRunner, "o/r", linuxX64, running)) // attempt 1
+	res := tf.open(t, w, dockerCaps(1, linuxX64), runningState(deferredRunner, "o/r", linuxX64, running))
 	ch := tf.directives(t, res.SessionID, w.ID)
-	for attempt := 2; attempt <= maxDeferAttempts; attempt++ {
-		if tf.Free(req) != 0 {
-			t.Fatalf("runner dropped before attempt %d", attempt)
-		}
-		tf.clock.Advance(tf.o.Timing.Lost)
+	const attempts = 8
+	for i := 1; i < attempts; i++ {
+		tf.clock.Advance(tf.o.Timing.Lost) // refills the one-slot budget
 		heartbeatRunning(t, tf, res.SessionID, w.ID, deferredRunner)
 	}
-	if c := recvDirective(t, ch).GetCancel(); c == nil || c.GetRunnerName() != deferredRunner {
-		t.Fatalf("want a Cancel for %s after %d failed lookups", deferredRunner, maxDeferAttempts)
+	select {
+	case d := <-ch:
+		t.Fatalf("directive %v after %d failed lookups, want none", d, attempts)
+	default:
 	}
-	if tf.Free(req) != 1 {
-		t.Fatalf("Free = %d, want 1 after the cancel", tf.Free(req))
+	if tf.Free(req) != 0 {
+		t.Fatalf("Free = %d, want 0: the runner stays deferred", tf.Free(req))
 	}
-	if n := tf.gh.getCalls(); n != maxDeferAttempts {
-		t.Fatalf("%d lookups, want %d", n, maxDeferAttempts)
+	if n := tf.gh.getCalls(); n != attempts {
+		t.Fatalf("%d lookups, want %d (one per budget refill)", n, attempts)
+	}
+	tf.gh.setGetErr(nil)
+	tf.gh.addRunner("o/r", deferredRunner, 55, 7)
+	tf.clock.Advance(tf.o.Timing.Lost)
+	heartbeatRunning(t, tf, res.SessionID, w.ID, deferredRunner)
+	if len(tf.adopter.list()) != 1 {
+		t.Fatal("not adopted once GitHub recovered")
+	}
+}
+
+// Reconnecting does not restart the hold cap.
+func TestSessionCyclingDoesNotResetTheHoldCap(t *testing.T) {
+	tf := newTestFleet(t)
+	w := testWorker("box", Bounds{Classes: []runner.Class{linuxX64}, MaxSlots: 1})
+	step := tf.o.Timing.LostStartedCap/3 + time.Minute
+	var res OpenSessionResult
+	for i := range 3 {
+		res = tf.open(t, w, dockerCaps(1, linuxX64), runningState(deferredRunner, "o/r", linuxX64, running))
+		if len(res.RejectedRunners) != 0 {
+			t.Fatalf("cycle %d: rejected %v before the cap", i, res.RejectedRunners)
+		}
+		if err := tf.CloseSession(res.SessionID, w.ID); err != nil {
+			t.Fatal(err)
+		}
+		tf.clock.Advance(step)
+	}
+	res = tf.open(t, w, dockerCaps(1, linuxX64), runningState(deferredRunner, "o/r", linuxX64, running))
+	if len(res.RejectedRunners) != 1 || res.RejectedRunners[0] != deferredRunner {
+		t.Fatalf("rejected = %v, want %s once the cap has passed across sessions", res.RejectedRunners, deferredRunner)
 	}
 }
 

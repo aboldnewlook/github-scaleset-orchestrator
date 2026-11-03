@@ -58,15 +58,15 @@ type adoptionSnapshot struct {
 	room     int
 }
 
-// maxDeferAttempts is how many lookups may fail for one deferred runner
-// before it is cancelled instead of retried.
-const maxDeferAttempts = 5
+// settleTimeout bounds the GitHub lookups of one settle. They run on their own
+// context so a client-side Heartbeat timeout does not cancel them.
+const settleTimeout = 10 * time.Second
 
-// deferral is a reported runner the router could not verify yet.
+// deferral is a reported runner the router could not verify yet. since is
+// carried across sessions, so cycling sessions cannot reset the hold cap.
 type deferral struct {
 	rs    *workerv1.RunnerState
 	since time.Time
-	errs  int // lookups that failed
 }
 
 // lookupBudget is a token bucket of GitHub lookups for one worker. It lives on
@@ -168,6 +168,7 @@ func (f *Fleet) OpenSession(ctx context.Context, w WorkerRecord, p OpenSessionPa
 			delete(reported, rs.GetRunnerName())
 		}
 	}
+	prevDeferred := m.deferred
 	m.deferred = nil
 	snap := adoptionSnapshot{workerID: m.workerID, slots: m.slots, segment: m.segment, bounds: m.bounds, classes: m.classes, room: m.free()}
 	eff := m.caps
@@ -191,10 +192,18 @@ func (f *Fleet) OpenSession(ctx context.Context, w WorkerRecord, p OpenSessionPa
 			rejected = append(rejected, d.rs.GetRunnerName())
 			continue
 		}
+		since := now
+		if prev := prevDeferred[d.rs.GetRunnerName()]; prev != nil {
+			since = prev.since // a new session does not restart the hold cap
+		}
+		if now.Sub(since) >= f.deferCap() {
+			rejected = append(rejected, d.rs.GetRunnerName()) // reported back: the worker kills it
+			continue
+		}
 		if m.deferred == nil {
 			m.deferred = map[string]*deferral{}
 		}
-		m.deferred[d.rs.GetRunnerName()] = &deferral{rs: d.rs, since: now, errs: d.errs}
+		m.deferred[d.rs.GetRunnerName()] = &deferral{rs: d.rs, since: since}
 	}
 	if len(m.deferred) > 0 {
 		m.settleAt = now // this round counts as a settle
@@ -220,10 +229,9 @@ func (f *Fleet) OpenSession(ctx context.Context, w WorkerRecord, p OpenSessionPa
 type adoptionVerdict int
 
 const (
-	verdictAdopt    adoptionVerdict = iota
-	verdictReject                   // positively not ours, or outside the worker's bounds
-	verdictDefer                    // cannot tell yet: scale set unknown or the worker's lookup budget is spent
-	verdictDeferErr                 // cannot tell yet: the GitHub lookup failed
+	verdictAdopt  adoptionVerdict = iota
+	verdictReject                 // positively not ours, or outside the worker's bounds
+	verdictDefer                  // cannot tell yet: scale set unknown or the worker's lookup budget is spent
 )
 
 func (f *Fleet) verifyAdoptions(ctx context.Context, m *member, s adoptionSnapshot, candidates []*workerv1.RunnerState) (adopted []*Reservation, rejected []string, deferred []*deferral) {
@@ -234,8 +242,6 @@ func (f *Fleet) verifyAdoptions(ctx context.Context, m *member, s adoptionSnapsh
 			adopted = append(adopted, r)
 		case verdictDefer:
 			deferred = append(deferred, &deferral{rs: rs})
-		case verdictDeferErr:
-			deferred = append(deferred, &deferral{rs: rs, errs: 1})
 		default:
 			rejected = append(rejected, rs.GetRunnerName())
 		}
@@ -281,7 +287,7 @@ func (f *Fleet) verifyAdoption(ctx context.Context, m *member, s *adoptionSnapsh
 	s.room--
 	ref, err := f.o.GitHub.GetRunnerByName(ctx, repo, name)
 	if err != nil {
-		return nil, verdictDeferErr
+		return nil, verdictDefer
 	}
 	if ref == nil || ref.ScaleSetID != scaleSetID {
 		return nil, verdictReject
@@ -357,7 +363,7 @@ func (f *Fleet) Heartbeat(ctx context.Context, sessionID, workerID string, avail
 				// Still unverifiable after the cap (unknown scale set, an
 				// unserved repo, GitHub down for hours): stop holding it.
 				delete(m.deferred, name)
-				f.sendLocked(m, cancelDirective(name, "could not be verified in time"))
+				f.sendLocked(m, cancelDirective(name, "could not be verified within the hold limit"))
 				changed = true
 			default:
 				d.rs = cur // settle what the worker reports now
@@ -372,9 +378,11 @@ func (f *Fleet) Heartbeat(ctx context.Context, sessionID, workerID string, avail
 	if len(pending) > 0 && f.anyScaleSetKnown(pending) {
 		if snap, ok := f.claimSettle(m, sessionID); ok {
 			snap.room = len(pending)
-			if f.settleDeferred(ctx, sessionID, m, snap, pending) {
+			sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), settleTimeout)
+			if f.settleDeferred(sctx, sessionID, m, snap, pending) {
 				changed = true
 			}
+			cancel()
 		}
 	}
 	if changed {
@@ -418,19 +426,12 @@ func (f *Fleet) claimSettle(m *member, sid string) (adoptionSnapshot, bool) {
 // cancelled on the worker; a verified one is adopted. It reports whether any
 // slot accounting changed.
 func (f *Fleet) settleDeferred(ctx context.Context, sid string, m *member, snap adoptionSnapshot, pending []*workerv1.RunnerState) bool {
-	adopted, rejected, still := f.verifyAdoptions(ctx, m, snap, pending)
+	// Lookup errors are GitHub-wide (5xx, network, 429, an expired token), not
+	// a verdict on the runner, so failures never promote a deferral to a
+	// rejection: the lookup budget bounds the cost and deferCap the hold time.
+	adopted, rejected, _ := f.verifyAdoptions(ctx, m, snap, pending)
 	f.mu.Lock()
 	m.settling = false
-	for _, d := range still {
-		name := d.rs.GetRunnerName()
-		cur := m.deferred[name]
-		if m.sessionID != sid || cur == nil || d.errs == 0 {
-			continue
-		}
-		if cur.errs++; cur.errs >= maxDeferAttempts {
-			rejected = append(rejected, name) // the lookup keeps failing for this runner
-		}
-	}
 	var registered []*Reservation
 	for _, r := range adopted {
 		if m.sessionID != sid || m.deferred[r.name] == nil {
@@ -445,7 +446,7 @@ func (f *Fleet) settleDeferred(ctx context.Context, sid string, m *member, snap 
 			continue
 		}
 		delete(m.deferred, name)
-		f.sendLocked(m, cancelDirective(name, "not recognised by the router"))
+		f.sendLocked(m, cancelDirective(name, "not recognised by GitHub for this router"))
 	}
 	f.mu.Unlock()
 	for _, r := range registered {
@@ -624,6 +625,7 @@ func (f *Fleet) RevokeWorker(ctx context.Context, workerID string) error {
 		f.endSessionLocked(m, false)
 	}
 	delete(f.members, workerID)
+	delete(f.budgets, workerID)
 	f.mu.Unlock()
 	f.removeRunners(ctx, removals) // JobStillRunning is logged: an assigned job runs to completion (spec §7)
 	f.publish(event.EventWorkerRevoked, "", map[string]any{"worker": m.name})
