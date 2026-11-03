@@ -10,13 +10,13 @@ workflows. It is for testing only.
   one message session per scale set, message queues, JIT runner registration,
   repository visibility and workflow runs. It outlives router restarts, as
   GitHub does.
-- The router is meant to use it instead of github.com when started with
+- The router uses it instead of github.com when started with
   `gso start --github-sim http://<sim>:9300` (or `github_sim:` in the config,
-  or `GSO_GITHUB_SIM`), with no token. **Pending A3b:** the orchestrator cannot
-  yet take the simulator's client factory, so for now `gso start --github-sim`
-  refuses to start ("refusing to start against real GitHub") rather than run
-  against github.com. Until A3b lands, only the simulator, `gso sim` commands,
-  fake runners and workers can be exercised on their own.
+  or `GSO_GITHUB_SIM`), with no token. The router logs a `SIMULATED GITHUB`
+  warning at startup. Scale sets, message sessions, JIT minting and runner
+  removal all go through the simulator; the router never resolves a token and
+  never contacts github.com. A job injected with `gso sim job` is placed on a
+  worker (or on the router's own local slots) exactly as a real one would be.
 - Jobs are injected by hand with `gso sim job`. A worker that receives one runs
   a **fake runner** that claims the job from the simulator, "works" for the
   requested duration and reports it done (see "Fake runners" below).
@@ -27,13 +27,29 @@ workflows. It is for testing only.
 gso sim serve --listen 127.0.0.1:9300 &
 gso start --config router.yaml --github-sim http://127.0.0.1:9300 &
 gso workers add laptop --classes linux-arm64 --slots 2 --advertise 127.0.0.1:9200
-gso worker --join 'gso-join:v1:…' --executor sim --name laptop
+gso worker --join 'gso-join:v1:…' --executor sim --github-sim http://127.0.0.1:9300 --name laptop
 gso sim job --sim http://127.0.0.1:9300 --repo o/a --duration 20s --count 3
 gso sim jobs --sim http://127.0.0.1:9300 --watch
 ```
 
+The steps, in order:
+
+1. `gso sim serve` starts the simulator.
+2. `gso start --github-sim <sim url>` starts the router against it.
+3. `gso workers add` enrolls a worker and prints its join string.
+4. `gso worker --executor sim --github-sim <sim url>` connects the worker.
+   `--github-sim` is the simulator's `--advertise` address; without it the
+   worker rejects the simulator's JIT configs. The `sim` executor needs no
+   image. A docker worker (`--executor docker`) needs the job image too, via
+   `--image <gso image>` or `GSO_WORKER_IMAGE`.
+5. `gso sim job` injects jobs; the router offers each to the worker, which
+   runs a fake runner for it.
+
 `router.yaml` needs `workers.listen`, `max_runners: 0` and a `repos:` list; the
-repositories do not have to exist anywhere.
+repositories do not have to exist anywhere. With `max_runners: 0` the router is
+route-only: it builds no local executor, downloads no runner and never opens
+the Docker socket. With `max_runners: N` it also runs N local slots, which need
+the runner (or Docker) to be available as for a real router.
 
 ## Running it on Unraid
 
@@ -138,7 +154,8 @@ as described under "Worker trust settings". `GSO_GITHUB_SIM` is read only with
 variable cannot widen its trust. The worker logs a warning at startup whenever
 its trusted hosts differ from the default. `--trusted-host` adds to
 `github.com` in sim mode. `--executor sim` is refused on Windows.
-`gso start --github-sim <url>` is the router side (pending A3b, above).
+`gso start --github-sim <url>` is the router side (see "Running it on one
+machine").
 
 `gso sim runner` claims a job, works for the job's `--duration`, checks for
 cancellation about once a second, and reports the result. If its runner is

@@ -56,7 +56,7 @@ const (
 // scale set; other failures back off from BackoffMin to BackoffMax. The
 // listener is degraded after DegradeAfter consecutive failures, or once the
 // 409 retries run out, and keeps retrying at BackoffMax.
-func (o *Orchestrator) superviseRepo(ctx context.Context, repo config.Repo, worker runner.Executor, sem *scaler.Semaphore) {
+func (o *Orchestrator) superviseRepo(ctx context.Context, repo config.Repo) {
 	name := naming.ScaleSetNameFor(o.instance, repo.Name, o.class)
 	logger := o.logger.With("repo", repo.Name, "class", o.class.String(), "scale_set", name)
 	o.updateStatus(repo.Name, func(st *control.ListenerLiveStatus) {
@@ -89,9 +89,9 @@ func (o *Orchestrator) superviseRepo(ctx context.Context, repo config.Repo, work
 	for {
 		err := func() error {
 			if client == nil {
-				c, err := o.github(ctx, repo)
+				c, err := o.clientFor(ctx, repo)
 				if err != nil {
-					return fmt.Errorf("creating GitHub client: %w", err)
+					return err
 				}
 				client = c
 			}
@@ -100,7 +100,7 @@ func (o *Orchestrator) superviseRepo(ctx context.Context, repo config.Repo, work
 				// suppress the migration warning for the life of the process.
 				checked = o.warnStaleScaleSets(ctx, client, repo.Name, map[string]bool{name: true}, logger)
 			}
-			return o.runListenerOnce(ctx, repo, client, name, &sc, worker, sem, logger, started)
+			return o.runListenerOnce(ctx, repo, client, name, &sc, logger, started)
 		}()
 		if ctx.Err() != nil {
 			return
@@ -155,8 +155,7 @@ func (o *Orchestrator) superviseRepo(ctx context.Context, repo config.Repo, work
 // stops; the error tells the supervisor how to retry.
 func (o *Orchestrator) runListenerOnce(
 	ctx context.Context, repo config.Repo, client ghapi.Client, name string,
-	sc **scaler.Scaler, worker runner.Executor, sem *scaler.Semaphore,
-	logger *slog.Logger, started func(scaleSetID int),
+	sc **scaler.Scaler, logger *slog.Logger, started func(scaleSetID int),
 ) error {
 	ss, err := o.ensureScaleSet(ctx, client, name, logger)
 	if err != nil {
@@ -178,19 +177,19 @@ func (o *Orchestrator) runListenerOnce(
 	}()
 
 	if *sc == nil {
-		*sc = o.newScaler(repo, ss.ID, client, worker, sem)
+		*sc = o.newScaler(repo, o.class, client)
 		o.registerScaler(repo.Name, *sc)
 	}
 	s := *sc
 	s.SetScaleSetID(ss.ID)
 	s.BindSession(session)
 
-	l, err := listener.New(session, listener.Config{ScaleSetID: ss.ID, MaxRunners: o.MaxRunners(), Logger: logger})
+	l, err := listener.New(session, listener.Config{ScaleSetID: ss.ID, MaxRunners: s.Capacity(), Logger: logger})
 	if err != nil {
 		return fmt.Errorf("creating listener: %w", err)
 	}
-	o.registerListener(repo.Name, l)
-	defer o.unregisterListener(repo.Name)
+	s.SetCapacitySink(l)
+	defer s.SetCapacitySink(nil)
 
 	logger.Info("listener started", "scale_set_id", ss.ID)
 	o.publish(event.Event{
@@ -236,20 +235,6 @@ func (o *Orchestrator) labels() []scaleset.Label {
 	return append(labels, scaleset.Label{Name: o.class.OSLabel()}, scaleset.Label{Name: o.class.ArchLabel()})
 }
 
-func (o *Orchestrator) newScaler(repo config.Repo, scaleSetID int, client ghapi.Client, worker runner.Executor, sem *scaler.Semaphore) *scaler.Scaler {
-	repoWorker := worker
-	if dockerWorker, ok := worker.(*runner.DockerWorker); ok {
-		cacheMode := o.cfg.Runner.Cache
-		if repo.RunnerCache != "" {
-			cacheMode = repo.RunnerCache
-		}
-		repoWorker = dockerWorker.ForRepo(repo.Name, cacheMode)
-	}
-	s := scaler.New(repo.Name, scaleSetID, client, repoWorker, sem, o.logger, o.bus)
-	s.SetRunnerNamer(func() string { return naming.RunnerName(naming.LocalWorkerSegment, repo.Name) })
-	return s
-}
-
 // warnStaleScaleSets flags gso-prefixed scale sets in the repo that are not
 // current. With identical labels and no session, whether GitHub still routes
 // jobs to them is UNKNOWN (spike b), so the rename treats them as an outage
@@ -292,14 +277,23 @@ func (o *Orchestrator) updateStatus(repo string, f func(*control.ListenerLiveSta
 // Listeners reports every supervised listener, sorted by repo and class.
 func (o *Orchestrator) Listeners() []control.ListenerLiveStatus {
 	o.mu.Lock()
-	defer o.mu.Unlock()
 	out := make([]control.ListenerLiveStatus, 0, len(o.status))
 	for _, st := range o.status {
-		cp := *st
-		if cp.State == stateRunning {
-			cp.Capacity = o.cfg.MaxRunners
+		out = append(out, *st)
+	}
+	o.mu.Unlock()
+	// The advertised capacity is the fleet's, not max_runners: with remote
+	// workers it is the slots of every eligible member. Asked outside o.mu
+	// because the fleet calls back into the orchestrator.
+	for i := range out {
+		if out[i].State != stateRunning {
+			continue
 		}
-		out = append(out, cp)
+		if class, err := runner.ParseClass(out[i].Class); err == nil {
+			if s := o.scalerFor(out[i].Repo, class); s != nil {
+				out[i].Capacity = s.Capacity()
+			}
+		}
 	}
 	slices.SortFunc(out, func(a, b control.ListenerLiveStatus) int {
 		return cmp.Or(cmp.Compare(a.Repo, b.Repo), cmp.Compare(a.Class, b.Class))

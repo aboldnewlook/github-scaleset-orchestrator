@@ -4,178 +4,28 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
-	"log/slog"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/event"
+	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/fleet"
 	"github.com/actions/scaleset"
 )
 
-func TestNewSemaphore(t *testing.T) {
-	tests := []struct {
-		name string
-		size int
-	}{
-		{"size 1", 1},
-		{"size 4", 4},
-		{"size 16", 16},
+// track registers a fleet reservation as one of s's runners, as place does,
+// without starting it. It returns the runner's name.
+func track(t *testing.T, s *Scaler, fl *fleet.Fleet, cancel context.CancelFunc, spawnedAt time.Time) string {
+	t.Helper()
+	res, ok := fl.Reserve(testRequest())
+	if !ok {
+		t.Fatal("no slot to reserve")
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			sem := NewSemaphore(tt.size)
-			if sem.Available() != tt.size {
-				t.Fatalf("Available() = %d, want %d", sem.Available(), tt.size)
-			}
-			if sem.Max() != tt.size {
-				t.Fatalf("Max() = %d, want %d", sem.Max(), tt.size)
-			}
-		})
-	}
-}
-
-func TestSemaphoreAcquireRelease(t *testing.T) {
-	sem := NewSemaphore(2)
-
-	if err := sem.Acquire(context.Background()); err != nil {
-		t.Fatalf("Acquire() error: %v", err)
-	}
-	if sem.Available() != 1 {
-		t.Fatalf("Available() = %d after 1 acquire, want 1", sem.Available())
-	}
-
-	if err := sem.Acquire(context.Background()); err != nil {
-		t.Fatalf("Acquire() error: %v", err)
-	}
-	if sem.Available() != 0 {
-		t.Fatalf("Available() = %d after 2 acquires, want 0", sem.Available())
-	}
-
-	sem.Release()
-	if sem.Available() != 1 {
-		t.Fatalf("Available() = %d after 1 release, want 1", sem.Available())
-	}
-
-	sem.Release()
-	if sem.Available() != 2 {
-		t.Fatalf("Available() = %d after 2 releases, want 2", sem.Available())
-	}
-}
-
-func TestSemaphoreAcquireContextCancellation(t *testing.T) {
-	sem := NewSemaphore(1)
-
-	// Fill the semaphore.
-	if err := sem.Acquire(context.Background()); err != nil {
-		t.Fatalf("Acquire() error: %v", err)
-	}
-
-	// Try to acquire with a cancelled context.
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	err := sem.Acquire(ctx)
-	if err == nil {
-		t.Fatal("expected error from cancelled context")
-	}
-	if err != context.Canceled {
-		t.Fatalf("expected context.Canceled, got: %v", err)
-	}
-
-	// Release and verify we can acquire again.
-	sem.Release()
-	if err := sem.Acquire(context.Background()); err != nil {
-		t.Fatalf("Acquire() after release error: %v", err)
-	}
-}
-
-func TestSemaphoreAcquireContextTimeout(t *testing.T) {
-	sem := NewSemaphore(1)
-
-	// Fill the semaphore.
-	if err := sem.Acquire(context.Background()); err != nil {
-		t.Fatalf("Acquire() error: %v", err)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancel()
-
-	err := sem.Acquire(ctx)
-	if err == nil {
-		t.Fatal("expected error from timed-out context")
-	}
-}
-
-func TestSemaphoreResize(t *testing.T) {
-	sem := NewSemaphore(2)
-
-	if err := sem.Acquire(context.Background()); err != nil {
-		t.Fatalf("Acquire() error: %v", err)
-	}
-	if err := sem.Acquire(context.Background()); err != nil {
-		t.Fatalf("Acquire() error: %v", err)
-	}
-
-	// Semaphore full — resize to 4.
-	sem.Resize(4)
-
-	if sem.Available() != 2 {
-		t.Fatalf("Available() = %d after resize to 4, want 2", sem.Available())
-	}
-	if sem.Max() != 4 {
-		t.Fatalf("Max() = %d after resize, want 4", sem.Max())
-	}
-
-	// Should be able to acquire 2 more.
-	if err := sem.Acquire(context.Background()); err != nil {
-		t.Fatalf("Acquire() after resize error: %v", err)
-	}
-	if err := sem.Acquire(context.Background()); err != nil {
-		t.Fatalf("Acquire() after resize error: %v", err)
-	}
-	if sem.Available() != 0 {
-		t.Fatalf("Available() = %d, want 0", sem.Available())
-	}
-}
-
-func TestSemaphoreConcurrency(t *testing.T) {
-	sem := NewSemaphore(3)
-	var wg sync.WaitGroup
-	active := make(chan int, 100)
-
-	for i := 0; i < 10; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if err := sem.Acquire(context.Background()); err != nil {
-				return
-			}
-			active <- 1
-			time.Sleep(time.Millisecond)
-			active <- -1
-			sem.Release()
-		}()
-	}
-
-	wg.Wait()
-	close(active)
-
-	// Verify we never exceeded capacity
-	current := 0
-	maxSeen := 0
-	for delta := range active {
-		current += delta
-		if current > maxSeen {
-			maxSeen = current
-		}
-	}
-
-	if maxSeen > 3 {
-		t.Fatalf("max concurrent = %d, want <= 3", maxSeen)
-	}
+	t.Cleanup(res.Release)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.runners[res.RunnerName()] = &tracked{res: res, cancel: cancel, spawnedAt: spawnedAt}
+	return res.RunnerName()
 }
 
 func TestRunnersToCreate(t *testing.T) {
@@ -205,17 +55,9 @@ func TestScaleDecisionRecordsChangesWithoutRepeatingIdlePolls(t *testing.T) {
 	bus := event.NewBus(nil)
 	id, events := bus.Subscribe(8)
 	defer bus.Unsubscribe(id)
-	sem := NewSemaphore(4)
-	if err := sem.Acquire(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	s := &Scaler{
-		repo:    "org/repo",
-		sem:     sem,
-		logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
-		bus:     bus,
-		runners: map[string]context.CancelFunc{"already-running": func() {}},
-	}
+	s, fl := newFleetScaler(t, 4, &fakeJITConfigGenerator{}, blockingExecutor())
+	s.bus = bus
+	track(t, s, fl, func() {}, time.Now()) // an already-running runner holds one slot
 
 	s.stats = scaleset.RunnerScaleSetStatistic{TotalAssignedJobs: 1}
 	for range 2 {
@@ -248,33 +90,26 @@ func TestScaleDecisionRecordsChangesWithoutRepeatingIdlePolls(t *testing.T) {
 }
 
 func TestJobCompletedReleasesCapacityBeforeNextScaleDecision(t *testing.T) {
-	sem := NewSemaphore(1)
-	if err := sem.Acquire(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	var once sync.Once
-	release := func() { once.Do(sem.Release) }
+	s, fl := newFleetScaler(t, 1, &fakeJITConfigGenerator{}, blockingExecutor())
 	cancelled := false
-	s := &Scaler{
-		repo:     "org/repo",
-		sem:      sem,
-		logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
-		runners:  map[string]context.CancelFunc{"done": func() { cancelled = true }},
-		releases: map[string]func(){"done": release},
-	}
-	s.onCompleted(&scaleset.JobCompleted{RunnerName: "done"})
+	name := track(t, s, fl, func() { cancelled = true }, time.Now())
+	s.mu.Lock()
+	res := s.runners[name].res
+	s.mu.Unlock()
+
+	s.onCompleted(&scaleset.JobCompleted{RunnerName: name})
 	if !cancelled {
 		t.Fatal("completed runner was not cancelled")
 	}
-	if got := sem.Available(); got != 1 {
+	if got := fl.Free(testRequest()); got != 1 {
 		t.Fatalf("available capacity = %d immediately after completion, want 1", got)
 	}
-	if got := runnersToCreate(1, len(s.Runners()), sem.Available()); got != 1 {
+	if got := runnersToCreate(1, len(s.Runners()), fl.Free(testRequest())); got != 1 {
 		t.Fatalf("next scale decision would create %d runners, want 1", got)
 	}
-	// The worker also releases on process exit; that must not free the slot twice.
-	release()
-	if got := sem.Available(); got != 1 {
+	// The executor also releases on process exit; that must not free the slot twice.
+	res.Release()
+	if got := fl.Free(testRequest()); got != 1 {
 		t.Fatalf("available capacity after worker exit = %d, want 1", got)
 	}
 }
@@ -283,12 +118,11 @@ func TestJobEventsIncludeMeasuredDurations(t *testing.T) {
 	bus := event.NewBus(nil)
 	id, events := bus.Subscribe(2)
 	defer bus.Unsubscribe(id)
-	s := &Scaler{
-		repo: "org/repo", logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		bus: bus, spawnedAt: map[string]time.Time{"runner-1": time.Now().Add(-3 * time.Second)},
-		runners: map[string]context.CancelFunc{"runner-1": func() {}},
-	}
-	s.onStarted(&scaleset.JobStarted{RunnerName: "runner-1"})
+	s, fl := newFleetScaler(t, 1, &fakeJITConfigGenerator{}, blockingExecutor())
+	s.bus = bus
+	name := track(t, s, fl, func() {}, time.Now().Add(-3*time.Second))
+
+	s.onStarted(&scaleset.JobStarted{RunnerName: name})
 	started := <-events
 	var startedPayload map[string]any
 	if err := json.Unmarshal(started.Payload, &startedPayload); err != nil {
@@ -299,9 +133,9 @@ func TestJobEventsIncludeMeasuredDurations(t *testing.T) {
 	}
 
 	s.mu.Lock()
-	s.jobStartedAt["runner-1"] = time.Now().Add(-2 * time.Second)
+	s.runners[name].startedAt = time.Now().Add(-2 * time.Second)
 	s.mu.Unlock()
-	s.onCompleted(&scaleset.JobCompleted{RunnerName: "runner-1"})
+	s.onCompleted(&scaleset.JobCompleted{RunnerName: name})
 	completed := <-events
 	var completedPayload map[string]any
 	if err := json.Unmarshal(completed.Payload, &completedPayload); err != nil {
@@ -310,8 +144,8 @@ func TestJobEventsIncludeMeasuredDurations(t *testing.T) {
 	if got := completedPayload["job_duration_ms"].(float64); got < 1900 || got > 3000 {
 		t.Fatalf("job duration = %v ms, want about 2000", got)
 	}
-	if len(s.spawnedAt) != 0 || len(s.jobStartedAt) != 0 {
-		t.Fatal("timing state retained after job completion")
+	if len(s.Runners()) != 0 {
+		t.Fatal("runner state retained after job completion")
 	}
 }
 
@@ -319,7 +153,8 @@ func TestUnknownJobEventsOmitUnmeasuredDurations(t *testing.T) {
 	bus := event.NewBus(nil)
 	id, events := bus.Subscribe(2)
 	defer bus.Unsubscribe(id)
-	s := &Scaler{repo: "org/repo", logger: slog.New(slog.NewTextHandler(io.Discard, nil)), bus: bus}
+	s, _ := newFleetScaler(t, 1, &fakeJITConfigGenerator{}, blockingExecutor())
+	s.bus = bus
 	s.onStarted(&scaleset.JobStarted{RunnerName: "unknown"})
 	s.onCompleted(&scaleset.JobCompleted{RunnerName: "unknown"})
 	for _, key := range []string{"runner_startup_ms", "job_duration_ms"} {
@@ -342,11 +177,12 @@ func TestRunnerExitEventIncludesElapsedTime(t *testing.T) {
 	bus := event.NewBus(nil)
 	id, events := bus.Subscribe(4)
 	defer bus.Unsubscribe(id)
-	s := New("org/repo", 42, &fakeJITConfigGenerator{},
+	s, _ := newFleetScaler(t, 1, &fakeJITConfigGenerator{},
 		workerFunc(func(context.Context, string, string) error {
 			time.Sleep(20 * time.Millisecond)
 			return nil
-		}), NewSemaphore(1), slog.New(slog.NewTextHandler(io.Discard, nil)), bus)
+		}))
+	s.bus = bus
 	if err := s.Scale(context.Background(), assigned(1)); err != nil {
 		t.Fatal(err)
 	}
@@ -437,8 +273,7 @@ func TestCompletedRunnerHandsCapacityToNextAssignedJob(t *testing.T) {
 		cancel()
 		close(worker.firstExitGate)
 	})
-	sem := NewSemaphore(1)
-	s := New("org/repo", 42, client, worker, sem, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
+	s, fl := newFleetScaler(t, 1, client, worker)
 
 	if err := s.Scale(ctx, assigned(1)); err != nil {
 		t.Fatal(err)
@@ -463,7 +298,7 @@ func TestCompletedRunnerHandsCapacityToNextAssignedJob(t *testing.T) {
 	}
 	// The first worker remains blocked in its exit path. The next assigned job
 	// must still be able to take the slot immediately.
-	if got := sem.Available(); got != 1 {
+	if got := fl.Free(testRequest()); got != 1 {
 		t.Fatalf("capacity after completion = %d, want 1", got)
 	}
 	nextCtx, nextCancel := context.WithTimeout(ctx, time.Second)
@@ -485,9 +320,7 @@ func TestCompletedRunnerHandsCapacityToNextAssignedJob(t *testing.T) {
 }
 
 func TestScalerRunners(t *testing.T) {
-	s := &Scaler{
-		runners: make(map[string]context.CancelFunc),
-	}
+	s, fl := newFleetScaler(t, 2, &fakeJITConfigGenerator{}, blockingExecutor())
 
 	// Empty initially
 	runners := s.Runners()
@@ -495,11 +328,8 @@ func TestScalerRunners(t *testing.T) {
 		t.Fatalf("expected 0 runners, got %d", len(runners))
 	}
 
-	// Add some runners
-	s.mu.Lock()
-	s.runners["runner-1"] = func() {}
-	s.runners["runner-2"] = func() {}
-	s.mu.Unlock()
+	a := track(t, s, fl, func() {}, time.Now())
+	b := track(t, s, fl, func() {}, time.Now())
 
 	runners = s.Runners()
 	if len(runners) != 2 {
@@ -511,21 +341,17 @@ func TestScalerRunners(t *testing.T) {
 	for _, name := range runners {
 		found[name] = true
 	}
-	if !found["runner-1"] || !found["runner-2"] {
-		t.Fatalf("expected runner-1 and runner-2, got %v", runners)
+	if !found[a] || !found[b] {
+		t.Fatalf("expected %s and %s, got %v", a, b, runners)
 	}
 }
 
 func TestScalerCancelRunner(t *testing.T) {
 	cancelled := make(map[string]bool)
-	s := &Scaler{
-		runners: make(map[string]context.CancelFunc),
-	}
-
-	s.mu.Lock()
-	s.runners["runner-a"] = func() { cancelled["runner-a"] = true }
-	s.runners["runner-b"] = func() { cancelled["runner-b"] = true }
-	s.mu.Unlock()
+	s, fl := newFleetScaler(t, 2, &fakeJITConfigGenerator{}, blockingExecutor())
+	var mu sync.Mutex
+	a := track(t, s, fl, func() { mu.Lock(); cancelled["a"] = true; mu.Unlock() }, time.Now())
+	b := track(t, s, fl, func() { mu.Lock(); cancelled["b"] = true; mu.Unlock() }, time.Now())
 
 	tests := []struct {
 		name     string
@@ -533,10 +359,10 @@ func TestScalerCancelRunner(t *testing.T) {
 		wantOK   bool
 		wantLeft int
 	}{
-		{"cancel existing runner", "runner-a", true, 1},
-		{"cancel same runner again", "runner-a", false, 1},
+		{"cancel existing runner", a, true, 1},
+		{"cancel same runner again", a, false, 1},
 		{"cancel nonexistent runner", "runner-z", false, 1},
-		{"cancel last runner", "runner-b", true, 0},
+		{"cancel last runner", b, true, 0},
 	}
 
 	for _, tt := range tests {
@@ -552,11 +378,10 @@ func TestScalerCancelRunner(t *testing.T) {
 	}
 
 	// Verify cancel functions were called
-	if !cancelled["runner-a"] {
-		t.Fatal("runner-a cancel function was not called")
-	}
-	if !cancelled["runner-b"] {
-		t.Fatal("runner-b cancel function was not called")
+	mu.Lock()
+	defer mu.Unlock()
+	if !cancelled["a"] || !cancelled["b"] {
+		t.Fatalf("cancel functions called: %v", cancelled)
 	}
 }
 
@@ -568,7 +393,7 @@ func TestScalerPublish(t *testing.T) {
 	s := &Scaler{
 		repo:    "org/repo",
 		bus:     bus,
-		runners: make(map[string]context.CancelFunc),
+		runners: make(map[string]*tracked),
 	}
 
 	e := event.Event{
@@ -594,7 +419,7 @@ func TestScalerPublish(t *testing.T) {
 func TestScalerPublish_NilBus(t *testing.T) {
 	s := &Scaler{
 		bus:     nil,
-		runners: make(map[string]context.CancelFunc),
+		runners: make(map[string]*tracked),
 	}
 
 	// Should not panic
@@ -633,37 +458,4 @@ type failingJITConfigGenerator struct{}
 
 func (failingJITConfigGenerator) GenerateJitRunnerConfig(context.Context, *scaleset.RunnerScaleSetJitRunnerSetting, int) (*scaleset.RunnerScaleSetJitRunnerConfig, error) {
 	return nil, errors.New("github: 500")
-}
-
-func TestStartRunnerDoesNotMintWithoutAFreeSlot(t *testing.T) {
-	client := &fakeJITConfigGenerator{}
-	sem := NewSemaphore(1)
-	if err := sem.Acquire(context.Background()); err != nil { // the only slot is taken
-		t.Fatal(err)
-	}
-	idle := workerFunc(func(context.Context, string, string) error { return nil })
-	s := New("org/repo", 42, client, idle, sem, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancel()
-	if err := s.startRunner(ctx); err == nil {
-		t.Fatal("startRunner() succeeded without a free slot")
-	}
-	if got := client.Calls(); got != 0 {
-		t.Fatalf("minted %d JIT configs while no slot was free, want 0", got)
-	}
-}
-
-func TestStartRunnerReturnsSlotWhenMintFails(t *testing.T) {
-	sem := NewSemaphore(1)
-	idle := workerFunc(func(context.Context, string, string) error { return nil })
-	s := New("org/repo", 42, failingJITConfigGenerator{}, idle, sem, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
-	if err := s.startRunner(context.Background()); err == nil {
-		t.Fatal("startRunner() succeeded although minting failed")
-	}
-	if got := sem.Available(); got != 1 {
-		t.Fatalf("Available() = %d after a failed mint, want 1", got)
-	}
-	if got := len(s.Runners()); got != 0 {
-		t.Fatalf("runners = %d after a failed mint, want 0", got)
-	}
 }

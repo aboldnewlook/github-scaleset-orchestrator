@@ -15,10 +15,10 @@ import (
 	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/config"
 	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/control"
 	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/event"
+	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/fleet"
 	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/ghapi"
 	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/ghsim"
 	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/naming"
-	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/scaler"
 	"github.com/aboldnewlook/github-scaleset-orchestrator/runner"
 	"github.com/actions/scaleset"
 )
@@ -146,8 +146,14 @@ func newTestOrchestrator(t *testing.T, gh ghapi.Factory, bus *event.Bus, tm Supe
 	for _, r := range repos {
 		cfg.Repos = append(cfg.Repos, config.Repo{Name: r})
 	}
-	return New(cfg, testLogger(), bus, WithGitHub(gh), WithSupervisorTiming(tm))
+	fl := fleet.New(fleet.Options{Logger: testLogger(), Timing: fleet.DefaultTiming()})
+	return New(cfg, testLogger(), bus, WithFleet(fl), WithGitHub(gh), WithSupervisorTiming(tm))
 }
+
+// execLocal serves one executor for every repo, as fleet.LocalExecutor.
+type execLocal struct{ exec runner.Executor }
+
+func (e execLocal) ForRepo(string, string) runner.Executor { return e.exec }
 
 // supervise runs one repo's supervisor until the test ends, and checks that
 // it returns once its context is cancelled.
@@ -158,11 +164,12 @@ func supervise(t *testing.T, o *Orchestrator, repo string) {
 
 func superviseWith(t *testing.T, o *Orchestrator, repo string, exec runner.Executor) {
 	t.Helper()
+	o.fleet.SetLocal(4, o.class, execLocal{exec})
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		o.superviseRepo(ctx, config.Repo{Name: repo}, exec, scaler.NewSemaphore(4))
+		o.superviseRepo(ctx, config.Repo{Name: repo})
 	}()
 	t.Cleanup(func() {
 		cancel()

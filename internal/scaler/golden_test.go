@@ -2,8 +2,6 @@ package scaler
 
 import (
 	"context"
-	"io"
-	"log/slog"
 	"testing"
 
 	"github.com/actions/scaleset"
@@ -78,7 +76,8 @@ func newGoldenScaler(t *testing.T, slots int) (*Scaler, *fakeJITConfigGenerator)
 		<-ctx.Done()
 		return ctx.Err()
 	})
-	return New("org/repo", 42, gen, blocking, NewSemaphore(slots), slog.New(slog.NewTextHandler(io.Discard, nil)), nil), gen
+	s, _ := newFleetScaler(t, slots, gen, blocking)
+	return s, gen
 }
 
 func goldenMessage(step goldenStep, names []string) *scaleset.RunnerScaleSetMessage {
