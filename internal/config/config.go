@@ -15,6 +15,7 @@ import (
 	"github.com/spf13/viper"
 
 	"github.com/aboldnewlook/github-scaleset-orchestrator/runner"
+	"github.com/aboldnewlook/github-scaleset-orchestrator/worker"
 )
 
 // TokenSource defines how to resolve a GitHub PAT.
@@ -271,6 +272,9 @@ func (c *Config) validate() error {
 		if repo.Name == "" {
 			return fmt.Errorf("repo name is required")
 		}
+		if err := worker.ValidPattern(repo.Name); err != nil || strings.HasSuffix(repo.Name, "/*") {
+			return fmt.Errorf("repos: invalid repo name %q: want owner/repo (owner [A-Za-z0-9-], repo [A-Za-z0-9._-])", repo.Name)
+		}
 		if repo.RunnerCache != "" && repo.RunnerCache != "none" && repo.RunnerCache != "repo" {
 			return fmt.Errorf("repo %s runner_cache must be none or repo", repo.Name)
 		}
@@ -324,6 +328,9 @@ func (w WorkersConfig) validate() error {
 		host, port, err := net.SplitHostPort(w.Advertise)
 		if err != nil || host == "" || !validPort(port) {
 			return fmt.Errorf("workers.advertise must be host:port, got %q", w.Advertise)
+		}
+		if err := worker.ValidJoinAddr(w.Advertise); err != nil {
+			return fmt.Errorf("workers.advertise %q: %w", w.Advertise, err)
 		}
 	}
 	for _, cidr := range w.AllowCIDRs {

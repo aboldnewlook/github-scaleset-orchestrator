@@ -131,6 +131,9 @@ func resolveWorkerSettings(f workerFlags, changed func(string) bool, getenv func
 	}
 	for _, a := range f.allow {
 		if a = strings.TrimSpace(a); a != "" {
+			if err := worker.ValidPattern(a); err != nil {
+				return workerSettings{}, fmt.Errorf("--allow: %w", err)
+			}
 			s.Allow = append(s.Allow, a)
 		}
 	}

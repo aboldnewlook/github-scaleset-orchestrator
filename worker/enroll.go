@@ -46,6 +46,9 @@ func Enroll(ctx context.Context, o EnrollOptions) (string, State, error) {
 	if credential == "" {
 		return "", State{}, errors.New("enroll: the router returned no credential")
 	}
+	if err := ValidatePatterns(resp.Msg.GetOwnerScopes()); err != nil {
+		return "", State{}, fmt.Errorf("enroll: the router sent bad owner scopes: %w", err)
+	}
 	b := resp.Msg.GetBounds()
 	st := State{
 		Name: o.Name,

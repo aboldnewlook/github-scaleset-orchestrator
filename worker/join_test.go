@@ -25,6 +25,21 @@ func TestParseJoin(t *testing.T) {
 		{"short code", "gso-join:v1:unraid.lan:9200:" + testPin + ":abcd", Join{}, "code must be 32 hex"},
 		{"no port", "gso-join:v1:unraid.lan:" + testPin + ":" + testCode, Join{}, "must be host:port"},
 		{"bad port", "gso-join:v1:unraid.lan:99999:" + testPin + ":" + testCode, Join{}, "invalid port"},
+		{"IPv4", "gso-join:v1:203.0.113.5:9200:" + testPin + ":" + testCode, Join{Addr: "203.0.113.5:9200", Pin: testPin, Code: testCode}, ""},
+		{"userinfo in host", "gso-join:v1:unraid.lan@203.0.113.5:9200:" + testPin + ":" + testCode, Join{}, "invalid host"},
+		{"path in host", "gso-join:v1:unraid.lan/x:9200:" + testPin + ":" + testCode, Join{}, "invalid host"},
+		{"query in host", "gso-join:v1:unraid.lan?x:9200:" + testPin + ":" + testCode, Join{}, "invalid host"},
+		{"fragment in host", "gso-join:v1:unraid.lan#x:9200:" + testPin + ":" + testCode, Join{}, "invalid host"},
+		{"backslash in host", "gso-join:v1:unraid.lan\\x:9200:" + testPin + ":" + testCode, Join{}, "invalid host"},
+		{"space in host", "gso-join:v1:unraid lan:9200:" + testPin + ":" + testCode, Join{}, "invalid host"},
+		{"zone in IPv6", "gso-join:v1:[fe80::1%en0]:9200:" + testPin + ":" + testCode, Join{}, "invalid host"},
+		{"empty label", "gso-join:v1:unraid..lan:9200:" + testPin + ":" + testCode, Join{}, "invalid host"},
+		{"leading dot", "gso-join:v1:.unraid.lan:9200:" + testPin + ":" + testCode, Join{}, "invalid host"},
+		{"underscore host", "gso-join:v1:un_raid:9200:" + testPin + ":" + testCode, Join{}, "invalid host"},
+		{"bracketed non-IP", "gso-join:v1:[unraid.lan]:9200:" + testPin + ":" + testCode, Join{}, "invalid host"},
+		{"port zero", "gso-join:v1:unraid.lan:0:" + testPin + ":" + testCode, Join{}, "invalid port"},
+		{"port 70000", "gso-join:v1:unraid.lan:70000:" + testPin + ":" + testCode, Join{}, "invalid port"},
+		{"port non-numeric", "gso-join:v1:unraid.lan:http:" + testPin + ":" + testCode, Join{}, "invalid port"},
 		{"nothing after prefix", "gso-join:v1:", Join{}, "missing"},
 	}
 	for _, tt := range tests {
@@ -81,6 +96,18 @@ func TestParseJoinErrorsNeverEchoAddress(t *testing.T) {
 		}
 		if strings.Contains(err.Error(), testCode) {
 			t.Fatalf("error leaks the code: %v", err)
+		}
+	}
+}
+
+func TestValidJoinAddr(t *testing.T) {
+	for addr, ok := range map[string]bool{
+		"unraid.lan:9200": true, "10.0.0.5:9200": true, "[fd00::1]:9200": true,
+		"my_nas:9200": false, "unraid.lan.:9200": false, "a@b:9200": false,
+		"unraid.lan:0": false, "unraid.lan": false, ":9200": false,
+	} {
+		if err := ValidJoinAddr(addr); (err == nil) != ok {
+			t.Errorf("ValidJoinAddr(%q) = %v, want ok=%v", addr, err, ok)
 		}
 	}
 }

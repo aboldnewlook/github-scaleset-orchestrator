@@ -115,6 +115,16 @@ func TestLoadValidation(t *testing.T) {
 			wantErr: "repo name is required",
 		},
 		{
+			name:    "repo name without a slash",
+			yaml:    "auth:\n  env: GH_TOK\nrepos:\n  - name: noslash\n",
+			wantErr: `"noslash"`,
+		},
+		{
+			name:    "repo name with a wildcard",
+			yaml:    "auth:\n  env: GH_TOK\nrepos:\n  - name: org/*\n",
+			wantErr: `"org/*"`,
+		},
+		{
 			name:    "repo without token and no global auth",
 			yaml:    "repos:\n  - name: org/repo\n",
 			wantErr: "no token source",
