@@ -296,10 +296,17 @@ func TestScaleSetIsKnownWhileTheSessionConflicts(t *testing.T) {
 	o := newTestOrchestrator(t, m.Factory(), nil, fastTiming(), "org/repo")
 	supervise(t, o, "org/repo")
 
-	eventually(t, "the listener to hit a conflict", func() bool { return listenerState(o, "org/repo").State == "retrying" })
+	// "retrying" is set at startup, so wait for a counted conflict instead.
+	eventually(t, "the listener to hit a conflict", func() bool {
+		l := listenerState(o, "org/repo")
+		return l.Failures >= 1 && strings.Contains(l.LastError, "creating message session")
+	})
 	id, ok := o.ScaleSetID("org/repo", o.class)
 	if !ok || id == 0 {
 		t.Fatalf("ScaleSetID = %d, %v while the session conflicts; the scale set exists and must be known", id, ok)
+	}
+	if n := len(m.Runners("org/repo")); n != 0 {
+		t.Fatalf("%d runners minted before any session opened, want 0", n)
 	}
 }
 
