@@ -278,6 +278,13 @@ func (f *Fleet) AcceptOffer(ctx context.Context, sessionID, workerID, offerID st
 		f.mu.Unlock()
 		return nil, ErrNotPermitted
 	}
+	// The worker may have been drained, narrowed or marked unavailable since
+	// the offer went out: no JIT is minted for a repo it may no longer take.
+	if !f.eligibleLocked(m, r.req) {
+		r.finishLocked(ErrOfferNotTaken)
+		f.mu.Unlock()
+		return nil, ErrNotPermitted
+	}
 	r.phase, r.acceptedAt = phaseAccepted, f.o.Now()
 	mint := r.mint
 	f.mu.Unlock()
@@ -389,6 +396,7 @@ func (f *Fleet) DrainWorker(workerID, reason string) error {
 	}
 	m.drainRequested = true
 	f.sendLocked(m, drainDirective(reason))
+	f.dropIneligibleOffersLocked(m)
 	f.mu.Unlock()
 	f.notify()
 	return nil
@@ -431,6 +439,7 @@ func (f *Fleet) UpdateBounds(workerID string, b Bounds) {
 	}
 	m.bounds = b
 	f.applyCapsLocked(m)
+	f.dropIneligibleOffersLocked(m)
 	f.mu.Unlock()
 	f.notify()
 }

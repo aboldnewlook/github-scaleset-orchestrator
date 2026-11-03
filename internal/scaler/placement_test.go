@@ -94,6 +94,46 @@ func TestAdoptTracksARunnerWithoutMinting(t *testing.T) {
 	})
 }
 
+func TestAdoptMatchesTheRepoCaseInsensitivelyAndRefusesDuplicates(t *testing.T) {
+	s, fl := newFleetScaler(t, 2, &fakeJITConfigGenerator{}, blockingExecutor())
+	res, ok := fl.Reserve(fleet.PlacementRequest{Repo: "ORG/Repo", Class: testClass, Cache: "none"})
+	if !ok {
+		t.Fatal("no slot")
+	}
+	if !s.Adopt(res) {
+		t.Fatal("Adopt refused a runner whose repo differs only by case")
+	}
+	if s.Adopt(res) {
+		t.Fatal("Adopt accepted a runner it already tracks; the fleet must finish the duplicate")
+	}
+	if got := len(s.Runners()); got != 1 {
+		t.Fatalf("runners = %d, want 1", got)
+	}
+}
+
+func TestPublicRepoRequestsCarryPublic(t *testing.T) {
+	s, fl := newFleetScaler(t, 1, &fakeJITConfigGenerator{}, blockingExecutor())
+	if s.request().Public {
+		t.Fatal("a scaler is not public until told")
+	}
+	s.SetPublic(true)
+	if !s.request().Public {
+		t.Fatal("SetPublic(true) did not reach the placement request")
+	}
+	// The default local member does not accept public repos: nothing is placed.
+	if err := s.Scale(context.Background(), statsMessage(1)); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(s.Runners()); got != 0 {
+		t.Fatalf("placed %d public runners on a member that does not accept public, want 0", got)
+	}
+	fl.SetLocalAcceptPublic(true)
+	s.Reevaluate(context.Background())
+	if got := len(s.Runners()); got != 1 {
+		t.Fatalf("runners = %d after the member accepted public, want 1", got)
+	}
+}
+
 func TestCapacityIsPushedToTheListener(t *testing.T) {
 	s, fl := newFleetScaler(t, 3, &fakeJITConfigGenerator{}, blockingExecutor())
 	rec := &capacityRecorder{}

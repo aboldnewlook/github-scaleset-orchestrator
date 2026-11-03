@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -73,6 +74,7 @@ type Scaler struct {
 
 	mu           sync.Mutex
 	scaleSetID   int
+	public       bool
 	runners      map[string]*tracked
 	lastDecision scaleDecision
 	hasDecision  bool
@@ -108,7 +110,7 @@ func New(cfg Config) *Scaler {
 		client:     cfg.Client,
 		placer:     cfg.Placer,
 		cache:      cache,
-		logger:     logger.With("repo", cfg.Repo),
+		logger:     logger.With("repo", cfg.Repo, "class", cfg.Class.String()),
 		bus:        cfg.Bus,
 		runners:    make(map[string]*tracked),
 		dedupe:     newDedupe(dedupeMaxEntries, dedupeTTL, time.Now),
@@ -216,7 +218,7 @@ func (s *Scaler) Capacity() int { return s.placer.Slots(s.request()) }
 // Adopt tracks a runner the fleet verified after a router restart. Nothing is
 // minted; the reservation is released by JobCompleted or the worker's EXITED.
 func (s *Scaler) Adopt(res *fleet.Reservation) bool {
-	if res == nil || res.Repo() != s.repo || res.Class() != s.class {
+	if res == nil || !strings.EqualFold(res.Repo(), s.repo) || res.Class() != s.class {
 		return false
 	}
 	name := res.RunnerName()
@@ -226,7 +228,7 @@ func (s *Scaler) Adopt(res *fleet.Reservation) bool {
 	if _, exists := s.runners[name]; exists {
 		s.mu.Unlock()
 		cancel()
-		return true
+		return false // a duplicate: the fleet finishes it
 	}
 	s.runners[name] = t
 	s.mu.Unlock()
@@ -266,7 +268,20 @@ func (s *Scaler) CancelRunner(name string) bool {
 }
 
 func (s *Scaler) request() fleet.PlacementRequest {
-	return fleet.PlacementRequest{Repo: s.repo, Class: s.class, Cache: s.cache}
+	s.mu.Lock()
+	public := s.public
+	s.mu.Unlock()
+	return fleet.PlacementRequest{Repo: s.repo, Class: s.class, Public: public, Cache: s.cache}
+}
+
+// SetPublic records whether the repository is public. Public requests go only
+// to members that accept public repositories and never use a shared cache.
+// The supervisor sets it from the repo's visibility before the listener
+// starts; it fails closed when visibility is unknown.
+func (s *Scaler) SetPublic(public bool) {
+	s.mu.Lock()
+	s.public = public
+	s.mu.Unlock()
 }
 
 // reconcile creates runners for assignments that have none, up to the free

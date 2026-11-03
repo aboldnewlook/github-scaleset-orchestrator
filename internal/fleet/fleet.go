@@ -147,6 +147,8 @@ type Fleet struct {
 	offers   map[string]*Reservation // by offer ID
 	started  time.Time
 	onChange []func()
+
+	localAcceptPublic bool // SetLocalAcceptPublic
 }
 
 const directiveBuffer = 64
@@ -221,6 +223,27 @@ func (f *Fleet) SetLocal(slots int, class runner.Class, exec LocalExecutor) {
 	f.notify()
 }
 
+// SetLocalAcceptPublic sets whether the local member takes public-repo jobs.
+// The router sets it to true so single-machine gso keeps running public repos
+// as it did before placement went through the fleet; C5 replaces that with
+// the configured router opt-in.
+func (f *Fleet) SetLocalAcceptPublic(accept bool) {
+	f.mu.Lock()
+	f.localAcceptPublic = accept
+	f.mu.Unlock()
+	f.notify()
+}
+
+// dropIneligibleOffersLocked finishes every offer m was sent that m no longer
+// qualifies for (drain, narrowed bounds), so the scaler re-places the job.
+func (f *Fleet) dropIneligibleOffersLocked(m *member) {
+	for _, r := range snapshot(m.busy) {
+		if r.phase == phaseOffered && !f.eligibleLocked(m, r.req) {
+			r.finishLocked(ErrOfferNotTaken)
+		}
+	}
+}
+
 // LocalSlots returns the local member's slots (0 when there is none).
 func (f *Fleet) LocalSlots() int {
 	f.mu.Lock()
@@ -290,7 +313,7 @@ func (f *Fleet) eligibleLocked(m *member, req PlacementRequest) bool {
 		return false
 	}
 	if m.local {
-		return m.slots > 0 && req.Class == m.class && !req.Public
+		return m.slots > 0 && req.Class == m.class && (!req.Public || f.localAcceptPublic)
 	}
 	if !m.connected || m.drainRequested || m.availability != workerv1.Availability_AVAILABILITY_AVAILABLE {
 		return false

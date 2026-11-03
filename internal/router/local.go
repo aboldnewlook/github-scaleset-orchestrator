@@ -42,6 +42,10 @@ func (r *Router) prepareLocal(ctx context.Context) error {
 	r.local = exec
 	r.mu.Unlock()
 	r.fleet.SetLocal(slots, r.cfg.DefaultClass(), exec)
+	// The local member keeps running public repos, as it did before placement
+	// went through the fleet. C5 replaces this with the configured router
+	// opt-in; remote workers decide for themselves (AcceptPublic).
+	r.fleet.SetLocalAcceptPublic(true)
 	r.started.Store(true)
 	return nil
 }

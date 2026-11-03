@@ -67,7 +67,7 @@ LAN address, not through the compose service name.
 | `--labels a,b` | `runs-on` labels; a scale set matches when its labels include all of them (default `self-hosted`) |
 | `--duration 30s` | How long the fake runner works |
 | `--count N` | Inject N identical jobs |
-| `--public` | Mark the repository public (exercises the public-repo policy) |
+| `--public` | Mark the repository public (exercises the public-repo policy). The router reads a repo's visibility when its listener starts, so inject the first `--public` job before `gso start`, or restart the router after it |
 | `--fork` | The run's head repository is a fork (exercises fork-cancel) |
 | `--event e` | Workflow event, e.g. `pull_request_target` |
 | `--result r` | Result the fake runner reports (default `succeeded`) |

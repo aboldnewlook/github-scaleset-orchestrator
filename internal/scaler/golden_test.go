@@ -68,7 +68,7 @@ var goldenCases = []goldenCase{
 }
 
 // newGoldenScaler builds a scaler with `slots` free slots whose runners block
-// until cancelled. B8a replaces this body with the fleet's local member.
+// until cancelled.
 func newGoldenScaler(t *testing.T, slots int) (*Scaler, *fakeJITConfigGenerator) {
 	t.Helper()
 	gen := &fakeJITConfigGenerator{}

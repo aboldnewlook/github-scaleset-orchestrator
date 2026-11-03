@@ -157,6 +157,15 @@ func (o *Orchestrator) runListenerOnce(
 	ctx context.Context, repo config.Repo, client ghapi.Client, name string,
 	sc **scaler.Scaler, logger *slog.Logger, started func(scaleSetID int),
 ) error {
+	// Fail closed: nothing is created or listened on until the repo's
+	// visibility is known, because a public repo's jobs must only reach members
+	// that accept public repos (spec §5.4). A lookup error is an ordinary
+	// retryable failure.
+	info, err := client.Repo(ctx)
+	if err != nil {
+		return fmt.Errorf("looking up repository visibility for %s: %w", repo.Name, err)
+	}
+	public := !info.Private && info.Visibility == "public"
 	ss, err := o.ensureScaleSet(ctx, client, name, logger)
 	if err != nil {
 		return err
@@ -181,6 +190,7 @@ func (o *Orchestrator) runListenerOnce(
 		o.registerScaler(repo.Name, *sc)
 	}
 	s := *sc
+	s.SetPublic(public)
 	s.SetScaleSetID(ss.ID)
 	s.BindSession(session)
 
