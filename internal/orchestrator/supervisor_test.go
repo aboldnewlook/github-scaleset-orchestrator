@@ -285,6 +285,31 @@ func TestSupervisorRetriesConflictWithoutDeleting(t *testing.T) {
 	}
 }
 
+// After a router restart GitHub may keep the old message session for a long
+// time. A worker reconnecting meanwhile reports its running runner, and the
+// fleet verifies it against the scale set: that ID must be known while the
+// listener is still retrying 409s, or the worker's job is killed.
+func TestScaleSetIsKnownWhileTheSessionConflicts(t *testing.T) {
+	m := newModel()
+	name := precreate(t, m, "org/repo")
+	m.FailSessions("org/repo", name, fmt.Errorf("creating message session: %w", scaleset.ConflictError), 1_000_000)
+	o := newTestOrchestrator(t, m.Factory(), nil, fastTiming(), "org/repo")
+	supervise(t, o, "org/repo")
+
+	// "retrying" is set at startup, so wait for a counted conflict instead.
+	eventually(t, "the listener to hit a conflict", func() bool {
+		l := listenerState(o, "org/repo")
+		return l.Failures >= 1 && strings.Contains(l.LastError, "creating message session")
+	})
+	id, ok := o.ScaleSetID("org/repo", o.class)
+	if !ok || id == 0 {
+		t.Fatalf("ScaleSetID = %d, %v while the session conflicts; the scale set exists and must be known", id, ok)
+	}
+	if n := len(m.Runners("org/repo")); n != 0 {
+		t.Fatalf("%d runners minted before any session opened, want 0", n)
+	}
+}
+
 func TestSupervisorDegradesAfterThreeFailuresThenRecovers(t *testing.T) {
 	m := newModel()
 	name := precreate(t, m, "org/repo")

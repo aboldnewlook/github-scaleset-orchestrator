@@ -100,6 +100,12 @@ type member struct {
 	exec                    LocalExecutor // local member only
 	slots                   int
 	busy                    map[string]*Reservation // by runner name
+	// deferred holds runners a worker reported that could not be verified yet
+	// (scale set or GitHub unavailable). They hold a slot but are neither
+	// adopted nor rejected until a heartbeat settles them.
+	deferred map[string]*deferral
+	settling bool      // a settle of deferred runners is in flight
+	settleAt time.Time // when deferred runners were last verified
 
 	// remote members only
 	bounds         Bounds
@@ -117,7 +123,7 @@ type member struct {
 	disconnectedAt time.Time
 }
 
-func (m *member) free() int { return max(m.slots-len(m.busy), 0) }
+func (m *member) free() int { return max(m.slots-len(m.busy)-len(m.deferred), 0) }
 
 func (m *member) availabilityString() string {
 	switch {
@@ -142,9 +148,10 @@ type Fleet struct {
 
 	mu       sync.Mutex
 	local    *member
-	members  map[string]*member      // remote, by worker ID
-	sessions map[string]*member      // by session ID
-	offers   map[string]*Reservation // by offer ID
+	members  map[string]*member       // remote, by worker ID
+	sessions map[string]*member       // by session ID
+	budgets  map[string]*lookupBudget // GitHub lookups per worker ID; outlives sessions
+	offers   map[string]*Reservation  // by offer ID
 	started  time.Time
 	onChange []func()
 
@@ -186,6 +193,7 @@ func New(o Options) *Fleet {
 		members:  map[string]*member{},
 		sessions: map[string]*member{},
 		offers:   map[string]*Reservation{},
+		budgets:  map[string]*lookupBudget{},
 	}
 }
 
@@ -386,7 +394,7 @@ func (f *Fleet) Members() []MemberStatus {
 	for _, m := range f.membersLocked() {
 		st := MemberStatus{
 			Name: m.name, WorkerID: m.workerID, Local: m.local, Connected: m.local || m.connected,
-			Availability: m.availabilityString(), Slots: m.slots, Busy: len(m.busy),
+			Availability: m.availabilityString(), Slots: m.slots, Busy: len(m.busy) + len(m.deferred),
 			AcceptPublic: m.acceptPublic, LastSeen: m.lastSeen,
 		}
 		if m.local {

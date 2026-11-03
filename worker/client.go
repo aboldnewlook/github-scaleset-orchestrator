@@ -475,8 +475,11 @@ func (c *Client) disconnect() {
 	c.sessionID = ""
 }
 
-// dropRejected kills runners whose adoption the router refused after its
-// restart: their JIT runners were removed on GitHub, so they can never take a job.
+// dropRejected kills runners the router refused to adopt after reconnecting:
+// it verified them against GitHub (or its own bounds) and they are not ours,
+// so a job running in them would be orphaned. A runner the router merely could
+// not verify yet is not listed here; it stays running and is reported again on
+// every heartbeat until the router settles it.
 func (c *Client) dropRejected(ctx context.Context, names []string) {
 	for _, name := range names {
 		c.logger.Warn("router rejected a running runner; killing it", "runner", name)

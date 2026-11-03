@@ -45,6 +45,20 @@ type fakeGitHub struct {
 	scaleSets map[string]int        // repo|class
 	removed   []int64
 	gets      int
+	getErr    error         // returned by GetRunnerByName while set
+	getDelay  time.Duration // GetRunnerByName blocks this long, to hold a settle in flight
+}
+
+func (g *fakeGitHub) setGetErr(err error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.getErr = err
+}
+
+func (g *fakeGitHub) setGetDelay(d time.Duration) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.getDelay = d
 }
 
 func (g *fakeGitHub) getCalls() int {
@@ -71,8 +85,17 @@ func (g *fakeGitHub) addRunner(repo, name string, id int64, scaleSetID int) {
 
 func (g *fakeGitHub) GetRunnerByName(_ context.Context, repo, name string) (*RunnerRef, error) {
 	g.mu.Lock()
-	defer g.mu.Unlock()
 	g.gets++
+	err, delay := g.getErr, g.getDelay
+	g.mu.Unlock()
+	if delay > 0 {
+		time.Sleep(delay)
+	}
+	if err != nil {
+		return nil, err
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	return g.runners[repo+"|"+name], nil
 }
 

@@ -173,6 +173,17 @@ func (o *Orchestrator) runListenerOnce(
 	client.SetSystemInfo(scaleset.SystemInfo{
 		System: "gso", Version: buildinfo.Version, Subsystem: "orchestrator", ScaleSetID: ss.ID,
 	})
+	// The scaler and its scale set ID exist before the message session opens:
+	// after a router restart GitHub can keep the old session (409) for longer
+	// than the reconnect grace, and a reconnecting worker's running runners are
+	// adopted only against a known scale set (spec §4.3).
+	if *sc == nil {
+		*sc = o.newScaler(repo, o.class, client)
+		o.registerScaler(repo.Name, *sc)
+	}
+	s := *sc
+	s.SetPublic(public)
+	s.SetScaleSetID(ss.ID)
 	session, err := client.OpenSession(ctx, ss.ID, o.instance)
 	if err != nil {
 		return fmt.Errorf("opening message session for %s: %w", name, err)
@@ -184,14 +195,6 @@ func (o *Orchestrator) runListenerOnce(
 			logger.Debug("closing message session", "error", err)
 		}
 	}()
-
-	if *sc == nil {
-		*sc = o.newScaler(repo, o.class, client)
-		o.registerScaler(repo.Name, *sc)
-	}
-	s := *sc
-	s.SetPublic(public)
-	s.SetScaleSetID(ss.ID)
 	s.BindSession(session)
 
 	l, err := listener.New(session, listener.Config{ScaleSetID: ss.ID, MaxRunners: s.Capacity(), Logger: logger})
