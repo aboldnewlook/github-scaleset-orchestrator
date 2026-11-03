@@ -2,8 +2,6 @@ package scaler
 
 import (
 	"context"
-	"io"
-	"log/slog"
 	"testing"
 
 	"github.com/actions/scaleset"
@@ -70,7 +68,7 @@ var goldenCases = []goldenCase{
 }
 
 // newGoldenScaler builds a scaler with `slots` free slots whose runners block
-// until cancelled. B8a replaces this body with the fleet's local member.
+// until cancelled.
 func newGoldenScaler(t *testing.T, slots int) (*Scaler, *fakeJITConfigGenerator) {
 	t.Helper()
 	gen := &fakeJITConfigGenerator{}
@@ -78,7 +76,8 @@ func newGoldenScaler(t *testing.T, slots int) (*Scaler, *fakeJITConfigGenerator)
 		<-ctx.Done()
 		return ctx.Err()
 	})
-	return New("org/repo", 42, gen, blocking, NewSemaphore(slots), slog.New(slog.NewTextHandler(io.Discard, nil)), nil), gen
+	s, _ := newFleetScaler(t, slots, gen, blocking)
+	return s, gen
 }
 
 func goldenMessage(step goldenStep, names []string) *scaleset.RunnerScaleSetMessage {

@@ -1,16 +1,11 @@
 package cmd
 
 import (
-	"io"
-	"net/http"
-	"net/http/httptest"
 	"os"
-	"path/filepath"
-	"strings"
-	"sync/atomic"
 	"testing"
 
 	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/config"
+	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/router"
 )
 
 func TestGitHubFactoryFor(t *testing.T) {
@@ -32,38 +27,12 @@ func TestApplyGitHubSimFlag(t *testing.T) {
 	}
 }
 
-// `gso start --github-sim` must fail closed until the orchestrator can use the
-// simulator: it exits non-zero, never reads a token and never dials the
-// simulator or GitHub.
-func TestStartWithGitHubSimRefusesToRun(t *testing.T) {
-	var hits atomic.Int32
-	sim := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { hits.Add(1) }))
-	t.Cleanup(sim.Close)
-
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
-	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, "cache"))
-	t.Setenv("GSO_GITHUB_SIM", "") // restored on cleanup; the flag handler sets it
-	cfgPath := filepath.Join(home, "config.yaml")
-	if err := os.WriteFile(cfgPath, []byte("repos:\n  - name: o/a\nmax_runners: 1\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	rootCmd.SetArgs([]string{"start", "--config", cfgPath, "--github-sim", sim.URL})
-	rootCmd.SetOut(io.Discard)
-	rootCmd.SetErr(io.Discard)
-	t.Cleanup(func() {
-		githubSim, cfgFile = "", ""
-		rootCmd.SetArgs(nil)
-		rootCmd.SetOut(nil)
-		rootCmd.SetErr(nil)
-	})
-	err := rootCmd.Execute()
-	if err == nil || !strings.Contains(err.Error(), "refusing to start against real GitHub") {
-		t.Fatalf("gso start --github-sim: error = %v, want a refusal", err)
-	}
-	if n := hits.Load(); n != 0 {
-		t.Fatalf("the simulator was contacted %d times", n)
+// The router takes the simulator's factory (it used to refuse one until the
+// orchestrator could honour it). Constructing it dials nothing.
+func TestRouterAcceptsTheSimulatorFactory(t *testing.T) {
+	cfg := &config.Config{GitHubSim: "http://sim:9300", Repos: []config.Repo{{Name: "o/a"}}}
+	r, err := router.New(cfg, nil, nil, router.Options{GitHub: githubFactoryFor(cfg), StateDir: t.TempDir()})
+	if err != nil || r == nil {
+		t.Fatalf("router.New with the simulator factory = %v, %v", r, err)
 	}
 }

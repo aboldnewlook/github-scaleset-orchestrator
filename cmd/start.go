@@ -76,7 +76,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 
 	githubFactory := githubFactoryFor(cfg)
 	if githubFactory != nil {
-		logger.Warn("SIMULATED GITHUB: jobs come from the gso simulator, not github.com", "sim", cfg.GitHubSim)
+		logger.Warn("SIMULATED GITHUB: scale sets, sessions and jobs come from the gso simulator, not github.com; no GitHub token is used", "sim", cfg.GitHubSim)
 	}
 	rt, err := router.New(cfg, logger, bus, router.Options{GitHub: githubFactory})
 	if err != nil {

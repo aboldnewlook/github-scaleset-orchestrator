@@ -3,20 +3,17 @@ package scaler
 import (
 	"context"
 	"errors"
-	"io"
-	"log/slog"
 	"slices"
 	"testing"
 
 	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/event"
+	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/naming"
 	"github.com/actions/scaleset"
 )
 
 func assigned(n int) *scaleset.RunnerScaleSetMessage {
 	return &scaleset.RunnerScaleSetMessage{MessageID: 1, Statistics: &scaleset.RunnerScaleSetStatistic{TotalAssignedJobs: n}}
 }
-
-func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
 func blockingWorker() workerFunc {
 	return workerFunc(func(ctx context.Context, _, _ string) error {
@@ -61,23 +58,9 @@ func count(events []event.Event, typ event.EventType) int {
 	return n
 }
 
-func TestSemaphoreTryAcquire(t *testing.T) {
-	sem := NewSemaphore(1)
-	if !sem.TryAcquire() {
-		t.Fatal("TryAcquire() on a free semaphore = false")
-	}
-	if sem.TryAcquire() {
-		t.Fatal("TryAcquire() on a full semaphore = true")
-	}
-	sem.Release()
-	if !sem.TryAcquire() {
-		t.Fatal("TryAcquire() after Release = false")
-	}
-}
-
 func TestScaleCachesStatisticsForIdlePolls(t *testing.T) {
 	gen := &fakeJITConfigGenerator{}
-	s := New("org/repo", 42, gen, blockingWorker(), NewSemaphore(2), discardLogger(), nil)
+	s, _ := newFleetScaler(t, 2, gen, blockingWorker())
 	initial := &scaleset.RunnerScaleSetMessage{MessageID: -1, Statistics: &scaleset.RunnerScaleSetStatistic{TotalAssignedJobs: 1}}
 	if err := s.Scale(t.Context(), initial); err != nil {
 		t.Fatal(err)
@@ -97,7 +80,8 @@ func TestScaleAcquiresAvailableJobsDefensively(t *testing.T) {
 	bus := event.NewBus(nil)
 	id, ch := bus.Subscribe(16)
 	defer bus.Unsubscribe(id)
-	s := New("org/repo", 42, &fakeJITConfigGenerator{}, blockingWorker(), NewSemaphore(1), discardLogger(), bus)
+	s, _ := newFleetScaler(t, 1, &fakeJITConfigGenerator{}, blockingWorker())
+	s.bus = bus
 	msg := &scaleset.RunnerScaleSetMessage{
 		MessageID:  3,
 		Statistics: &scaleset.RunnerScaleSetStatistic{},
@@ -132,7 +116,8 @@ func TestScaleJobAssignedCallsHookButNeverPlaces(t *testing.T) {
 	id, ch := bus.Subscribe(8)
 	defer bus.Unsubscribe(id)
 	gen := &fakeJITConfigGenerator{}
-	s := New("org/repo", 42, gen, blockingWorker(), NewSemaphore(2), discardLogger(), bus)
+	s, _ := newFleetScaler(t, 2, gen, blockingWorker())
+	s.bus = bus
 	var hooked []string
 	s.OnAssigned(func(_ context.Context, a *scaleset.JobAssigned) { hooked = append(hooked, a.JobID) })
 	msg := &scaleset.RunnerScaleSetMessage{
@@ -158,7 +143,8 @@ func TestScaleDedupesRedeliveredJobMessages(t *testing.T) {
 	bus := event.NewBus(nil)
 	id, ch := bus.Subscribe(16)
 	defer bus.Unsubscribe(id)
-	s := New("org/repo", 42, &fakeJITConfigGenerator{}, blockingWorker(), NewSemaphore(1), discardLogger(), bus)
+	s, _ := newFleetScaler(t, 1, &fakeJITConfigGenerator{}, blockingWorker())
+	s.bus = bus
 	msg := &scaleset.RunnerScaleSetMessage{
 		MessageID:            5,
 		Statistics:           &scaleset.RunnerScaleSetStatistic{},
@@ -181,8 +167,8 @@ func TestScaleTreatsCanceledWithoutRunnerAsReassignment(t *testing.T) {
 	bus := event.NewBus(nil)
 	id, ch := bus.Subscribe(16)
 	defer bus.Unsubscribe(id)
-	sem := NewSemaphore(1)
-	s := New("org/repo", 42, &fakeJITConfigGenerator{}, blockingWorker(), sem, discardLogger(), bus)
+	s, fl := newFleetScaler(t, 1, &fakeJITConfigGenerator{}, blockingWorker())
+	s.bus = bus
 	if err := s.Scale(t.Context(), assigned(1)); err != nil {
 		t.Fatal(err)
 	}
@@ -197,7 +183,7 @@ func TestScaleTreatsCanceledWithoutRunnerAsReassignment(t *testing.T) {
 	if got := len(s.Runners()); got != 1 {
 		t.Fatalf("runners = %d after a reassignment, want 1 (a reassignment is not a runner exit)", got)
 	}
-	if got := sem.Available(); got != 0 {
+	if got := fl.Free(testRequest()); got != 0 {
 		t.Fatalf("available = %d after a reassignment, want 0", got)
 	}
 	evs := drain(ch)
@@ -207,8 +193,7 @@ func TestScaleTreatsCanceledWithoutRunnerAsReassignment(t *testing.T) {
 }
 
 func TestScaleCompletionForUnknownRunnerIsNoOp(t *testing.T) {
-	sem := NewSemaphore(2)
-	s := New("org/repo", 42, &fakeJITConfigGenerator{}, blockingWorker(), sem, discardLogger(), nil)
+	s, fl := newFleetScaler(t, 2, &fakeJITConfigGenerator{}, blockingWorker())
 	msg := &scaleset.RunnerScaleSetMessage{
 		MessageID:            7,
 		Statistics:           &scaleset.RunnerScaleSetStatistic{},
@@ -217,7 +202,7 @@ func TestScaleCompletionForUnknownRunnerIsNoOp(t *testing.T) {
 	if err := s.Scale(t.Context(), msg); err != nil {
 		t.Fatal(err)
 	}
-	if got := sem.Available(); got != 2 {
+	if got := fl.Free(testRequest()); got != 2 {
 		t.Fatalf("available = %d, want 2", got)
 	}
 }
@@ -226,12 +211,12 @@ func TestScaleNeverReturnsAnErrorWhenMintingFails(t *testing.T) {
 	bus := event.NewBus(nil)
 	id, ch := bus.Subscribe(8)
 	defer bus.Unsubscribe(id)
-	sem := NewSemaphore(1)
-	s := New("org/repo", 42, failingJITConfigGenerator{}, blockingWorker(), sem, discardLogger(), bus)
+	s, fl := newFleetScaler(t, 1, failingJITConfigGenerator{}, blockingWorker())
+	s.bus = bus
 	if err := s.Scale(t.Context(), assigned(1)); err != nil {
 		t.Fatalf("Scale() = %v; an error would stop the listener (spec §5.2)", err)
 	}
-	if got := sem.Available(); got != 1 {
+	if got := fl.Free(testRequest()); got != 1 {
 		t.Fatalf("available = %d after a failed mint, want 1", got)
 	}
 	if got := count(drain(ch), event.EventError); got != 1 {
@@ -241,39 +226,42 @@ func TestScaleNeverReturnsAnErrorWhenMintingFails(t *testing.T) {
 
 func TestReevaluatePlacesWithCachedStatistics(t *testing.T) {
 	gen := &fakeJITConfigGenerator{}
-	sem := NewSemaphore(1)
-	if !sem.TryAcquire() { // another repo holds the only slot
-		t.Fatal("TryAcquire failed")
+	s, fl := newFleetScaler(t, 1, gen, blockingWorker())
+	held, ok := fl.Reserve(testRequest()) // another repo holds the only slot
+	if !ok {
+		t.Fatal("Reserve failed")
 	}
-	s := New("org/repo", 42, gen, blockingWorker(), sem, discardLogger(), nil)
 	if err := s.Scale(t.Context(), assigned(1)); err != nil {
 		t.Fatal(err)
 	}
 	if got := gen.Calls(); got != 0 {
 		t.Fatalf("minted %d without a free slot", got)
 	}
-	sem.Release()
+	held.Release()
 	s.Reevaluate(t.Context())
 	if got := gen.Calls(); got != 1 {
 		t.Fatalf("Reevaluate minted %d, want 1", got)
 	}
 }
 
-func TestScaleUsesCurrentScaleSetIDAndNamer(t *testing.T) {
+func TestScaleUsesCurrentScaleSetIDAndTheFleetsRunnerName(t *testing.T) {
 	gen := &fakeJITConfigGenerator{}
-	s := New("org/repo", 42, gen, blockingWorker(), NewSemaphore(1), discardLogger(), nil)
+	s, _ := newFleetScaler(t, 1, gen, blockingWorker())
 	s.SetScaleSetID(99)
 	if got := s.ScaleSetID(); got != 99 {
 		t.Fatalf("ScaleSetID() = %d, want 99", got)
 	}
-	s.SetRunnerNamer(func() string { return "gso-local-repo-abc123" })
 	if err := s.Scale(t.Context(), assigned(1)); err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(gen.ScaleSetIDs(), []int{99}) || !slices.Equal(gen.Names(), []string{"gso-local-repo-abc123"}) {
-		t.Fatalf("minted for scale sets %v with names %v", gen.ScaleSetIDs(), gen.Names())
+	names := gen.Names()
+	if !slices.Equal(gen.ScaleSetIDs(), []int{99}) || len(names) != 1 {
+		t.Fatalf("minted for scale sets %v with names %v", gen.ScaleSetIDs(), names)
 	}
-	if got := s.Runners(); !slices.Equal(got, []string{"gso-local-repo-abc123"}) {
-		t.Fatalf("Runners() = %v", got)
+	if seg, _ := naming.RunnerWorkerSegment(names[0]); seg != naming.LocalWorkerSegment {
+		t.Fatalf("runner %q is not named for the local member", names[0])
+	}
+	if got := s.Runners(); !slices.Equal(got, names) {
+		t.Fatalf("Runners() = %v, want %v", got, names)
 	}
 }

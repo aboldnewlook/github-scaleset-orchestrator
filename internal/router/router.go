@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/config"
@@ -43,11 +44,14 @@ type Options struct {
 	// StateDir holds workers.json and workers/tls. "" = config.StateDir().
 	StateDir string
 	// GitHub replaces the real GitHub client factory (tests, simulator). The
-	// orchestrator cannot take one until A3b/B8a, so New refuses a non-nil
-	// value rather than silently using real GitHub.
+	// orchestrator takes it through orchestrator.WithGitHub and then never
+	// resolves a token or builds a real client. nil = real GitHub.
 	GitHub ghapi.Factory
 	// FleetTiming overrides fleet.DefaultTiming().
 	FleetTiming *fleet.Timing
+	// LocalExecutor replaces the local member's executor (tests: no runner
+	// download, no Docker). nil = built from runner.* when max_runners > 0.
+	LocalExecutor fleet.LocalExecutor
 }
 
 // Router is one gso router process.
@@ -73,6 +77,8 @@ type Router struct {
 	addr      string
 	ready     chan struct{}
 	readyOnce sync.Once
+	local     fleet.LocalExecutor // nil when there is no local member
+	started   atomic.Bool         // prepareLocal ran
 }
 
 var (
@@ -83,12 +89,6 @@ var (
 // New builds the router. With workers.listen set it loads (or creates) the
 // worker registry and the listener key, so the SPKI pin is known before Run.
 func New(cfg *config.Config, logger *slog.Logger, bus *event.Bus, o Options) (*Router, error) {
-	if o.GitHub != nil {
-		// The orchestrator cannot take a GitHub factory yet (A3b/B8a replace this
-		// check with the wiring). Starting anyway would drive real GitHub with
-		// the real token while the caller believes it is simulating.
-		return nil, errors.New("github simulator wiring requires orchestrator support (A3b); refusing to start against real GitHub")
-	}
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
@@ -113,9 +113,11 @@ func New(cfg *config.Config, logger *slog.Logger, bus *event.Bus, o Options) (*R
 	}
 	r.fleet = fleet.New(fo)
 
-	// Options.GitHub reaches the orchestrator in B8a (orchestrator.WithGitHub
-	// lands with A3b). Until then router tests stub runOrchestrator.
-	r.orch = orchestrator.New(cfg, logger, bus)
+	oopts := []orchestrator.Option{orchestrator.WithFleet(r.fleet)}
+	if o.GitHub != nil {
+		oopts = append(oopts, orchestrator.WithGitHub(o.GitHub))
+	}
+	r.orch = orchestrator.New(cfg, logger, bus, oopts...)
 	r.runOrchestrator = r.orch.Run
 
 	if cfg.WorkersEnabled() {
@@ -162,6 +164,9 @@ func (r *Router) openWorkerState() error {
 // orchestrator, and blocks until ctx is cancelled or the orchestrator fails.
 func (r *Router) Run(ctx context.Context) error {
 	r.fleet.Start(ctx)
+	if err := r.prepareLocal(ctx); err != nil {
+		return err
+	}
 	if err := r.startWorkers(ctx); err != nil {
 		return err
 	}
@@ -187,10 +192,9 @@ func newWorkerHTTPServer(ctx context.Context, h http.Handler, tlsCfg *tls.Config
 
 func (r *Router) startWorkers(ctx context.Context) error {
 	if !r.cfg.WorkersEnabled() {
-		go func() {
-			r.waitScaleSets(ctx)
-			r.markReady()
-		}()
+		// No worker listener means no reconnecting worker to hold back, so there
+		// is nothing to wait for (B8 minor).
+		r.markReady()
 		return nil
 	}
 	nets, err := r.allowNets()
