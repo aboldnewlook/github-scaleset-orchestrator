@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -17,8 +15,6 @@ import (
 	"github.com/aboldnewlook/github-scaleset-orchestrator/runner"
 	"github.com/aboldnewlook/github-scaleset-orchestrator/worker"
 )
-
-var repoBoundPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+/([A-Za-z0-9_.-]+|\*)$`)
 
 // workerErr maps fleet.ErrUnknownWorker to a clear not-found error so the
 // admin path never reports it as an internal failure.
@@ -69,8 +65,8 @@ func (r *Router) parseBounds(classes []string, slots int, repos []string) (fleet
 		if repo == "" {
 			continue
 		}
-		if !repoBoundPattern.MatchString(repo) {
-			return fleet.Bounds{}, fmt.Errorf("repo bound %q: want owner/repo or owner/*", repo)
+		if err := worker.ValidPattern(repo); err != nil {
+			return fleet.Bounds{}, fmt.Errorf("repo bound %q: %w", repo, err)
 		}
 		b.Repos = append(b.Repos, repo)
 	}
@@ -95,7 +91,7 @@ func (r *Router) AddWorker(_ context.Context, p control.WorkersAddParams) (contr
 	if advertise == "" {
 		return control.WorkersAddResult{}, fmt.Errorf("no advertise address: set workers.advertise (GSO_WORKERS_ADVERTISE) or pass --advertise host:port")
 	}
-	if _, _, err := net.SplitHostPort(advertise); err != nil {
+	if err := worker.ValidJoinAddr(advertise); err != nil {
 		return control.WorkersAddResult{}, fmt.Errorf("advertise address %q: %w", advertise, err)
 	}
 	code, expires, err := reg.AddEnrollment(p.Name, b, time.Now())

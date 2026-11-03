@@ -54,15 +54,8 @@ func ParseJoin(s string) (Join, error) {
 	if !codePattern.MatchString(code) {
 		return Join{}, errors.New("join string enrollment code must be 32 hex characters")
 	}
-	host, port, err := net.SplitHostPort(addr)
-	if err != nil || host == "" {
-		return Join{}, errors.New("join string address must be host:port")
-	}
-	if !validJoinHost(addr, host) {
-		return Join{}, errors.New("join string address has an invalid host: use a DNS name, an IPv4 address or a bracketed IPv6 address")
-	}
-	if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
-		return Join{}, errors.New("join string address has an invalid port")
+	if err := ValidJoinAddr(addr); err != nil {
+		return Join{}, fmt.Errorf("join string %w", err)
 	}
 	return Join{Addr: addr, Pin: pin, Code: code}, nil
 }
@@ -113,4 +106,20 @@ func ShortPin(pin string) string {
 		groups = append(groups, pin)
 	}
 	return strings.Join(groups, " ")
+}
+
+// ValidJoinAddr checks a router "host:port" the way ParseJoin does, so a router
+// never mints a join string that every worker rejects.
+func ValidJoinAddr(addr string) error {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil || host == "" {
+		return errors.New("address must be host:port")
+	}
+	if !validJoinHost(addr, host) {
+		return errors.New("address has an invalid host: use a DNS name, an IPv4 address or a bracketed IPv6 address")
+	}
+	if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
+		return errors.New("address has an invalid port")
+	}
+	return nil
 }

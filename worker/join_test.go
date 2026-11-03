@@ -99,3 +99,15 @@ func TestParseJoinErrorsNeverEchoAddress(t *testing.T) {
 		}
 	}
 }
+
+func TestValidJoinAddr(t *testing.T) {
+	for addr, ok := range map[string]bool{
+		"unraid.lan:9200": true, "10.0.0.5:9200": true, "[fd00::1]:9200": true,
+		"my_nas:9200": false, "unraid.lan.:9200": false, "a@b:9200": false,
+		"unraid.lan:0": false, "unraid.lan": false, ":9200": false,
+	} {
+		if err := ValidJoinAddr(addr); (err == nil) != ok {
+			t.Errorf("ValidJoinAddr(%q) = %v, want ok=%v", addr, err, ok)
+		}
+	}
+}
