@@ -9,9 +9,11 @@ import (
 	"time"
 
 	"github.com/actions/scaleset"
+	"github.com/actions/scaleset/listener"
 
 	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/config"
 	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/control"
+	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/ghapi"
 	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/ghsim"
 	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/naming"
 	"github.com/aboldnewlook/github-scaleset-orchestrator/runner"
@@ -84,7 +86,40 @@ type resetEnv struct {
 	listenersErr error
 }
 
-func newResetEnv(t *testing.T) *resetEnv {
+// wrapClient decorates the simulator client to inject GitHub misbehaviour.
+type wrapClient func(ghapi.Client) ghapi.Client
+
+// nilStatsClient returns scale sets without statistics (or with fixed ones).
+type nilStatsClient struct {
+	ghapi.Client
+	stats *scaleset.RunnerScaleSetStatistic
+}
+
+func (c nilStatsClient) GetRunnerScaleSet(ctx context.Context, g int, name string) (*scaleset.RunnerScaleSet, error) {
+	ss, err := c.Client.GetRunnerScaleSet(ctx, g, name)
+	if ss != nil {
+		cp := *ss
+		cp.Statistics = c.stats
+		ss = &cp
+	}
+	return ss, err
+}
+
+type closeFailClient struct{ ghapi.Client }
+
+type closeFailSession struct{ listener.Client }
+
+func (c closeFailClient) OpenSession(ctx context.Context, id int, owner string) (ghapi.Session, error) {
+	s, err := c.Client.OpenSession(ctx, id, owner)
+	if err != nil {
+		return nil, err
+	}
+	return closeFailSession{s}, nil
+}
+
+func (closeFailSession) Close(context.Context) error { return errors.New("close failed") }
+
+func newResetEnv(t *testing.T, wraps ...wrapClient) *resetEnv {
 	t.Helper()
 	m := ghsim.NewModel(ghsim.Options{PollWait: 20 * time.Millisecond, SessionTTL: time.Minute})
 	cfg := &config.Config{
@@ -102,7 +137,13 @@ func newResetEnv(t *testing.T) *resetEnv {
 	}
 	e.id = ss.ID
 	e.q = NewQueryWith(cfg, slog.New(slog.DiscardHandler), Deps{
-		GitHub: m.Factory(),
+		GitHub: func(ctx context.Context, repo config.Repo) (ghapi.Client, error) {
+			c, err := m.Factory()(ctx, repo)
+			for _, w := range wraps {
+				c = w(c)
+			}
+			return c, err
+		},
 		Deleter: func(_ context.Context, repo config.Repo) (ScaleSetDeleter, error) {
 			return simDeleter{m: m, repo: repo.Name}, nil
 		},
@@ -129,12 +170,112 @@ func TestResetScaleSetDeletesAndReportsIDForAnyRepoCase(t *testing.T) {
 
 func TestResetScaleSetNotFound(t *testing.T) {
 	e := newResetEnv(t)
-	_, _, err := e.q.ResetScaleSet(context.Background(), "o/prune", runner.Class{OS: "linux", Arch: "arm64"})
+	if err := e.m.DeleteScaleSet("o/prune", e.id); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := e.q.ResetScaleSet(context.Background(), "o/prune", linuxX64)
 	if err == nil || !strings.Contains(err.Error(), "not found") {
 		t.Fatalf("ResetScaleSet(missing) = %v", err)
 	}
-	if len(e.m.Deleted("o/prune")) != 0 {
+	if len(e.m.Deleted("o/prune")) != 1 {
 		t.Fatal("deleted something that was not found")
+	}
+}
+
+func TestResetScaleSetRefusesNonDefaultClass(t *testing.T) {
+	e := newResetEnv(t)
+	_, _, err := e.q.ResetScaleSet(context.Background(), "o/prune", runner.Class{OS: "linux", Arch: "arm64"})
+	if err == nil || !strings.Contains(err.Error(), "linux-x64") || !strings.Contains(err.Error(), "nothing would recreate") {
+		t.Fatalf("err = %v, want a default-class refusal naming linux-x64", err)
+	}
+	if len(e.m.Deleted("o/prune")) != 0 {
+		t.Fatal("deleted a non-default class")
+	}
+}
+
+func TestResetScaleSetRefusesWithoutStatistics(t *testing.T) {
+	e := newResetEnv(t, func(c ghapi.Client) ghapi.Client { return nilStatsClient{Client: c} })
+	_, _, err := e.q.ResetScaleSet(context.Background(), "o/prune", linuxX64)
+	if !errors.Is(err, ErrScaleSetBusy) {
+		t.Fatalf("err = %v, want ErrScaleSetBusy", err)
+	}
+	if len(e.m.Deleted("o/prune")) != 0 {
+		t.Fatal("deleted without statistics")
+	}
+}
+
+func TestResetScaleSetRefusesWhenProbeStatisticsAreBusy(t *testing.T) {
+	// The lookup read idle statistics; by the probe the scale set is busy.
+	idle := &scaleset.RunnerScaleSetStatistic{}
+	e := newResetEnv(t, func(c ghapi.Client) ghapi.Client { return nilStatsClient{Client: c, stats: idle} })
+	e.m.SetStats("o/prune", e.name, scaleset.RunnerScaleSetStatistic{TotalRunningJobs: 1})
+	_, _, err := e.q.ResetScaleSet(context.Background(), "o/prune", linuxX64)
+	if !errors.Is(err, ErrScaleSetBusy) {
+		t.Fatalf("err = %v, want ErrScaleSetBusy", err)
+	}
+	if len(e.m.Deleted("o/prune")) != 0 {
+		t.Fatal("deleted despite busy probe statistics")
+	}
+}
+
+func TestResetScaleSetRefusesOnProbeErrors(t *testing.T) {
+	t.Run("non-409 open error", func(t *testing.T) {
+		e := newResetEnv(t)
+		e.m.FailSessions("o/prune", e.name, errors.New("boom"), 1)
+		_, _, err := e.q.ResetScaleSet(context.Background(), "o/prune", linuxX64)
+		if err == nil || errors.Is(err, ErrScaleSetLive) || !strings.Contains(err.Error(), "boom") {
+			t.Fatalf("err = %v, want the open error", err)
+		}
+		if len(e.m.Deleted("o/prune")) != 0 {
+			t.Fatal("deleted after a failed probe")
+		}
+	})
+	t.Run("close error", func(t *testing.T) {
+		e := newResetEnv(t, func(c ghapi.Client) ghapi.Client { return closeFailClient{c} })
+		_, _, err := e.q.ResetScaleSet(context.Background(), "o/prune", linuxX64)
+		if err == nil || !strings.Contains(err.Error(), "close failed") {
+			t.Fatalf("err = %v, want the close error", err)
+		}
+		if len(e.m.Deleted("o/prune")) != 0 {
+			t.Fatal("deleted after a failed probe close")
+		}
+	})
+}
+
+func TestResetScaleSetDegradedListenerForAnotherScaleSetDoesNotSkipProbe(t *testing.T) {
+	e := newResetEnv(t)
+	if _, err := e.m.Client("o/prune").OpenSession(context.Background(), e.id, "foreign"); err != nil {
+		t.Fatal(err)
+	}
+	e.listenersErr = nil
+	e.listeners = []control.ListenerLiveStatus{{Repo: "o/prune", Class: "linux-x64", ScaleSetName: "gso-other-prune-linux-x64", State: "degraded"}}
+	_, _, err := e.q.ResetScaleSet(context.Background(), "o/prune", linuxX64)
+	if !errors.Is(err, ErrScaleSetLive) {
+		t.Fatalf("err = %v, want ErrScaleSetLive", err)
+	}
+	if len(e.m.Deleted("o/prune")) != 0 {
+		t.Fatal("deleted while a foreign session was held")
+	}
+}
+
+func TestResetScaleSetRunningListenerOfAnotherClassDoesNotBlock(t *testing.T) {
+	e := newResetEnv(t)
+	e.listenersErr = nil
+	e.listeners = []control.ListenerLiveStatus{{Repo: "o/prune", Class: "linux-arm64", ScaleSetName: "gso-unraid-prune-linux-arm64", State: "running"}}
+	if _, _, err := e.q.ResetScaleSet(context.Background(), "o/prune", linuxX64); err != nil {
+		t.Fatalf("ResetScaleSet: %v", err)
+	}
+}
+
+func TestStatusRepoFilterIsCaseInsensitive(t *testing.T) {
+	e := newResetEnv(t)
+	st, err := e.q.Status(context.Background(), "O/PRU")
+	if err != nil || len(st.Repos) != 1 {
+		t.Fatalf("Status(filter O/PRU) = %+v, %v", st, err)
+	}
+	sets, err := e.q.ScaleSets(context.Background(), "O/PRU")
+	if err != nil || len(sets) != 1 {
+		t.Fatalf("ScaleSets(filter O/PRU) = %+v, %v", sets, err)
 	}
 }
 
@@ -201,7 +342,7 @@ func TestResetScaleSetAllowsDegradedLocalListener(t *testing.T) {
 				t.Fatal(err)
 			}
 			e.listenersErr = nil
-			e.listeners = []control.ListenerLiveStatus{{Repo: "o/prune", Class: "linux-x64", ScaleSetID: e.id, State: state}}
+			e.listeners = []control.ListenerLiveStatus{{Repo: "o/prune", Class: "linux-x64", ScaleSetID: e.id, ScaleSetName: e.name, State: state}}
 			if _, _, err := e.q.ResetScaleSet(context.Background(), "o/prune", linuxX64); err != nil {
 				t.Fatalf("ResetScaleSet: %v", err)
 			}

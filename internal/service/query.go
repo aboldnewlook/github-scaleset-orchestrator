@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/config"
 	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/control"
@@ -93,7 +94,7 @@ func (q *Query) Status(ctx context.Context, repoFilter string) (*StatusResult, e
 	result := &StatusResult{MaxRunners: q.cfg.MaxRunners}
 
 	for _, repo := range q.cfg.Repos {
-		if repoFilter != "" && !strings.Contains(repo.Name, repoFilter) {
+		if repoFilter != "" && !strings.Contains(asciiLower(repo.Name), asciiLower(repoFilter)) {
 			continue
 		}
 
@@ -138,7 +139,7 @@ func (q *Query) ScaleSets(ctx context.Context, repoFilter string) ([]ScaleSetInf
 	var results []ScaleSetInfo
 
 	for _, repo := range q.cfg.Repos {
-		if repoFilter != "" && !strings.Contains(repo.Name, repoFilter) {
+		if repoFilter != "" && !strings.Contains(asciiLower(repo.Name), asciiLower(repoFilter)) {
 			continue
 		}
 
@@ -417,6 +418,9 @@ func (q *Query) ResetScaleSet(ctx context.Context, repo string, class runner.Cla
 		return "", 0, err
 	}
 	name := naming.ScaleSetNameFor(naming.InstanceID(q.cfg.Runner.InstanceID), r.Name, class)
+	if def := q.cfg.DefaultClass(); class != def {
+		return name, 0, fmt.Errorf("refusing to reset %s: only the default class %s is served until multi-class support; nothing would recreate it", name, def)
+	}
 	client, err := q.github(ctx, r)
 	if err != nil {
 		return name, 0, err
@@ -429,16 +433,20 @@ func (q *Query) ResetScaleSet(ctx context.Context, repo string, class runner.Cla
 		return name, 0, fmt.Errorf("scale set %s not found in %s", name, r.Name)
 	}
 
-	stuck, err := q.listenerState(ctx, r.Name, class)
+	stuck, err := q.listenerState(ctx, r.Name, class, name)
 	if err != nil {
 		return name, ss.ID, err
 	}
-	if st := ss.Statistics; st != nil && (st.TotalBusyRunners > 0 || st.TotalRunningJobs > 0 || st.TotalAssignedJobs > 0 || st.TotalAcquiredJobs > 0) {
-		return name, ss.ID, fmt.Errorf("%w: %s has %d busy runners, %d running, %d assigned and %d acquired jobs; wait for them to finish, then run reset again",
-			ErrScaleSetBusy, name, st.TotalBusyRunners, st.TotalRunningJobs, st.TotalAssignedJobs, st.TotalAcquiredJobs)
+	if err := checkIdle(name, ss.Statistics); err != nil {
+		return name, ss.ID, err
 	}
 	if !stuck {
-		if err := probeSession(ctx, client, ss.ID, name); err != nil {
+		// The probe's own statistics are the last read before the delete.
+		st, err := probeSession(ctx, client, ss.ID, name)
+		if err != nil {
+			return name, ss.ID, err
+		}
+		if err := checkIdle(name, st); err != nil {
 			return name, ss.ID, err
 		}
 	}
@@ -456,7 +464,7 @@ func (q *Query) ResetScaleSet(ctx context.Context, repo string, class runner.Cla
 // listenerState inspects the local daemon. stuck is true when its listener
 // for repo and class is degraded or retrying, the case reset exists for; it
 // errors with ErrScaleSetLive when that listener is running.
-func (q *Query) listenerState(ctx context.Context, repo string, class runner.Class) (stuck bool, err error) {
+func (q *Query) listenerState(ctx context.Context, repo string, class runner.Class, name string) (stuck bool, err error) {
 	if q.listeners == nil {
 		return false, nil
 	}
@@ -468,8 +476,10 @@ func (q *Query) listenerState(ctx context.Context, repo string, class runner.Cla
 		if asciiLower(l.Repo) != asciiLower(repo) || l.Class != class.String() {
 			continue
 		}
+		// Only a stuck listener of this exact scale set skips the probe;
+		// any other degraded listener leaves the probe to decide.
 		if l.State == "degraded" || l.State == "retrying" {
-			return true, nil
+			return l.ScaleSetName == name, nil
 		}
 		return false, fmt.Errorf("%w: its %s listener for %s is %q; stop gso first", ErrScaleSetLive, class, repo, l.State)
 	}
@@ -479,16 +489,34 @@ func (q *Query) listenerState(ctx context.Context, repo string, class runner.Cla
 // probeSession opens and closes a message session to learn whether another
 // owner (a live gso, possibly on another host) holds the scale set. Any
 // failure other than success refuses: unknown is treated as live.
-func probeSession(ctx context.Context, client ghapi.Client, id int, name string) error {
+// It returns the statistics the session reported (nil if it reported none).
+func probeSession(ctx context.Context, client ghapi.Client, id int, name string) (*scaleset.RunnerScaleSetStatistic, error) {
 	s, err := client.OpenSession(ctx, id, resetProbeOwner)
 	if err != nil {
 		if ghapi.IsConflict(err) {
-			return fmt.Errorf("%w: %s has an open message session; stop the gso that owns it first (if none is running, the session expires on its own): %w", ErrScaleSetLive, name, err)
+			return nil, fmt.Errorf("%w: %s has an open message session; stop the gso that owns it first (if none is running, the session expires on its own): %w", ErrScaleSetLive, name, err)
 		}
-		return fmt.Errorf("checking %s for a live listener: %w", name, err)
+		return nil, fmt.Errorf("checking %s for a live listener: %w", name, err)
 	}
-	if err := s.Close(ctx); err != nil {
-		return fmt.Errorf("closing the probe session on %s: %w", name, err)
+	st := s.Session().Statistics
+	// Close even if ctx was cancelled, so the probe never strands the session.
+	closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	if err := s.Close(closeCtx); err != nil {
+		return nil, fmt.Errorf("closing the probe session on %s: %w", name, err)
+	}
+	return st, nil
+}
+
+// checkIdle refuses when statistics are missing (unknown is treated as busy)
+// or show busy runners or jobs in flight.
+func checkIdle(name string, st *scaleset.RunnerScaleSetStatistic) error {
+	if st == nil {
+		return fmt.Errorf("%w: GitHub returned no statistics for %s, so it cannot be shown idle", ErrScaleSetBusy, name)
+	}
+	if st.TotalBusyRunners > 0 || st.TotalRunningJobs > 0 || st.TotalAssignedJobs > 0 || st.TotalAcquiredJobs > 0 {
+		return fmt.Errorf("%w: %s has %d busy runners, %d running, %d assigned and %d acquired jobs; wait for them to finish, then run reset again",
+			ErrScaleSetBusy, name, st.TotalBusyRunners, st.TotalRunningJobs, st.TotalAssignedJobs, st.TotalAcquiredJobs)
 	}
 	return nil
 }

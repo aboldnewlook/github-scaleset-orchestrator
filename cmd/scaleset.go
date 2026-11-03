@@ -47,7 +47,7 @@ var scalesetResetCmd = &cobra.Command{
 	Short: "Delete this instance's scale set for a repo and class so the daemon recreates it",
 	Long: "Deletes the scale set gso uses for <repo> and <class> (for example linux-x64) so a running " +
 		"gso recreates it on its next listener retry. gso never deletes a scale set by itself, not even " +
-		"on a 409; this is the manual escape hatch. Idle runners registered to the scale set are removed with it.\n\n" +
+		"on a 409; this is the manual escape hatch. Only the default class is served, so only it can be reset.\n\n" +
 		"reset refuses (and --force does not override) when the scale set has busy runners or jobs in " +
 		"flight, when this machine's gso reports the listener running, or when another gso holds the " +
 		"scale set's message session. Stop that gso, or wait, and run reset again. A listener that is " +

@@ -73,10 +73,22 @@ deletes a scale set for you, and it refuses rather than risk a live one:
   `retrying` listener is the case it is for);
 - when another gso, possibly on another host, holds the scale set's message
   session (stop it, or wait for the session to expire);
-- when the scale set has busy runners or assigned, acquired or running jobs.
+- when the scale set has busy runners or assigned, acquired or running jobs,
+  or when GitHub returns no statistics for it;
+- when the liveness probe fails for any reason other than a held session
+  (unknown is treated as live);
+- for any class other than the default class (`workers.default_class`, else
+  the host's class): only that class is served until multi-class support, so
+  nothing would recreate the scale set.
 
-`--force` only skips the confirmation prompt; it does not override a refusal.
-Idle runners registered to the scale set are removed with it.
+The liveness probe (a brief message session) is skipped only when the local
+gso reports the listener for that exact scale set as `degraded` or
+`retrying`. `--force` only skips the confirmation prompt; it does not
+override a refusal.
+
+Verify in the live test: idle runners registered to the scale set are
+removed with it, and the real service returns statistics on both the lookup
+and the probe session.
 
 ### Listener supervision
 
