@@ -100,6 +100,10 @@ type member struct {
 	exec                    LocalExecutor // local member only
 	slots                   int
 	busy                    map[string]*Reservation // by runner name
+	// deferred holds runners a worker reported that could not be verified yet
+	// (scale set or GitHub unavailable). They hold a slot but are neither
+	// adopted nor rejected until a heartbeat settles them.
+	deferred map[string]*workerv1.RunnerState
 
 	// remote members only
 	bounds         Bounds
@@ -117,7 +121,7 @@ type member struct {
 	disconnectedAt time.Time
 }
 
-func (m *member) free() int { return max(m.slots-len(m.busy), 0) }
+func (m *member) free() int { return max(m.slots-len(m.busy)-len(m.deferred), 0) }
 
 func (m *member) availabilityString() string {
 	switch {

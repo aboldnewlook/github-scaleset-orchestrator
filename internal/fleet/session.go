@@ -120,12 +120,13 @@ func (f *Fleet) OpenSession(ctx context.Context, w WorkerRecord, p OpenSessionPa
 			delete(reported, rs.GetRunnerName())
 		}
 	}
+	m.deferred = nil
 	snap := adoptionSnapshot{segment: m.segment, bounds: m.bounds, classes: m.classes, room: m.free()}
 	eff := m.caps
 	f.mu.Unlock()
 
 	f.removeRunners(ctx, removals)
-	adopted, rejected := f.verifyAdoptions(ctx, m, snap, candidates)
+	adopted, rejected, deferred := f.verifyAdoptions(ctx, m, snap, candidates)
 
 	f.mu.Lock()
 	var registered []*Reservation
@@ -137,6 +138,16 @@ func (f *Fleet) OpenSession(ctx context.Context, w WorkerRecord, p OpenSessionPa
 		m.busy[r.name] = r
 		registered = append(registered, r)
 	}
+	for _, rs := range deferred {
+		if m.sessionID != sid || m.free() == 0 {
+			rejected = append(rejected, rs.GetRunnerName())
+			continue
+		}
+		if m.deferred == nil {
+			m.deferred = map[string]*workerv1.RunnerState{}
+		}
+		m.deferred[rs.GetRunnerName()] = rs
+	}
 	f.mu.Unlock()
 	for _, r := range registered {
 		if !f.o.Adopter.Adopt(r.req.Repo, r.req.Class, r) {
@@ -146,7 +157,7 @@ func (f *Fleet) OpenSession(ctx context.Context, w WorkerRecord, p OpenSessionPa
 		}
 		f.publish(event.EventRunnerAdopted, r.req.Repo, map[string]any{"runner": r.name, "worker": m.name})
 	}
-	f.o.Logger.Info("worker session opened", "worker", m.name, "slots", eff.GetSlots(), "adopted", len(registered), "rejected", len(rejected))
+	f.o.Logger.Info("worker session opened", "worker", m.name, "slots", eff.GetSlots(), "adopted", len(registered), "rejected", len(rejected), "deferred", len(deferred))
 	f.publish(event.EventWorkerConnected, "", map[string]any{"worker": m.name, "slots": eff.GetSlots()})
 	f.notify()
 	return OpenSessionResult{
@@ -155,18 +166,27 @@ func (f *Fleet) OpenSession(ctx context.Context, w WorkerRecord, p OpenSessionPa
 	}, nil
 }
 
-func (f *Fleet) verifyAdoptions(ctx context.Context, m *member, s adoptionSnapshot, candidates []*workerv1.RunnerState) ([]*Reservation, []string) {
-	var adopted []*Reservation
-	var rejected []string
+type adoptionVerdict int
+
+const (
+	verdictAdopt  adoptionVerdict = iota
+	verdictReject                 // positively not ours, or outside the worker's bounds
+	verdictDefer                  // cannot tell yet: scale set unknown or GitHub unreachable
+)
+
+func (f *Fleet) verifyAdoptions(ctx context.Context, m *member, s adoptionSnapshot, candidates []*workerv1.RunnerState) (adopted []*Reservation, rejected []string, deferred []*workerv1.RunnerState) {
 	for _, rs := range candidates {
-		r, ok := f.verifyAdoption(ctx, m, &s, rs)
-		if !ok {
+		r, v := f.verifyAdoption(ctx, m, &s, rs)
+		switch v {
+		case verdictAdopt:
+			adopted = append(adopted, r)
+		case verdictDefer:
+			deferred = append(deferred, rs)
+		default:
 			rejected = append(rejected, rs.GetRunnerName())
-			continue
 		}
-		adopted = append(adopted, r)
 	}
-	return adopted, rejected
+	return adopted, rejected, deferred
 }
 
 // verifyAdoption applies spec §4.3 "Binding": the runner name carries this
@@ -177,26 +197,37 @@ func (f *Fleet) verifyAdoptions(ctx context.Context, m *member, s adoptionSnapsh
 // the repo has a scale set for the class), and at most s.room times: each
 // lookup consumes a slot of room whether or not it succeeds, so a worker
 // cannot make the router fan out GitHub calls.
-func (f *Fleet) verifyAdoption(ctx context.Context, m *member, s *adoptionSnapshot, rs *workerv1.RunnerState) (*Reservation, bool) {
+//
+// Not knowing the repo's scale set yet (the router restarted while GitHub is
+// slow) or failing to reach GitHub is not a verdict: the runner is deferred,
+// not rejected, and a later heartbeat settles it. Only a positive answer from
+// GitHub, or a failed local check, rejects.
+func (f *Fleet) verifyAdoption(ctx context.Context, m *member, s *adoptionSnapshot, rs *workerv1.RunnerState) (*Reservation, adoptionVerdict) {
 	if f.o.GitHub == nil || f.o.Adopter == nil {
-		return nil, false
+		return nil, verdictReject
 	}
 	name, repo := rs.GetRunnerName(), rs.GetRepo()
 	if seg, ok := naming.RunnerWorkerSegment(name); !ok || seg != s.segment || !hasRunnerSuffix(name) {
-		return nil, false
+		return nil, verdictReject
 	}
 	class, err := ClassFromProto(rs.GetClass())
 	if err != nil || !s.classes[class] || !repoAllowed(s.bounds.Repos, repo) {
-		return nil, false
+		return nil, verdictReject
 	}
 	scaleSetID, ok := f.o.GitHub.ScaleSetID(repo, class)
-	if !ok || s.room <= 0 {
-		return nil, false
+	if !ok {
+		return nil, verdictDefer
+	}
+	if s.room <= 0 {
+		return nil, verdictReject
 	}
 	s.room--
 	ref, err := f.o.GitHub.GetRunnerByName(ctx, repo, name)
-	if err != nil || ref == nil || ref.ScaleSetID != scaleSetID {
-		return nil, false
+	if err != nil {
+		return nil, verdictDefer
+	}
+	if ref == nil || ref.ScaleSetID != scaleSetID {
+		return nil, verdictReject
 	}
 	r := newReservation(f, m, name, PlacementRequest{Repo: repo, Class: class})
 	r.runnerID = ref.ID
@@ -205,7 +236,7 @@ func (f *Fleet) verifyAdoption(ctx context.Context, m *member, s *adoptionSnapsh
 	} else {
 		r.phase, r.acceptedAt = phaseAccepted, f.o.Now()
 	}
-	return r, true
+	return r, verdictAdopt
 }
 
 // hasRunnerSuffix reports whether the name ends in the 6-character [a-z0-9]
@@ -238,7 +269,7 @@ func (f *Fleet) Directives(sessionID, workerID string) (<-chan *workerv1.Directi
 
 // Heartbeat records liveness, availability and accept_public. Running
 // entries are honoured only for runners placed on this worker.
-func (f *Fleet) Heartbeat(_ context.Context, sessionID, workerID string, availability workerv1.Availability, running []*workerv1.RunnerState, acceptPublic bool) (*workerv1.PublicPolicy, error) {
+func (f *Fleet) Heartbeat(ctx context.Context, sessionID, workerID string, availability workerv1.Availability, running []*workerv1.RunnerState, acceptPublic bool) (*workerv1.PublicPolicy, error) {
 	f.mu.Lock()
 	m, err := f.sessionLocked(sessionID, workerID)
 	if err != nil {
@@ -252,11 +283,72 @@ func (f *Fleet) Heartbeat(_ context.Context, sessionID, workerID string, availab
 			r.phase = phaseRunning
 		}
 	}
+	var pending []*workerv1.RunnerState
+	var snap adoptionSnapshot
+	if len(m.deferred) > 0 {
+		reported := make(map[string]bool, len(running))
+		for _, rs := range running {
+			reported[rs.GetRunnerName()] = true
+		}
+		for name, rs := range m.deferred {
+			if reported[name] {
+				pending = append(pending, rs)
+			} else {
+				delete(m.deferred, name) // it finished
+				changed = true
+			}
+		}
+		// One GitHub lookup per deferred runner at most: the budget is the
+		// number of slots they hold, so heartbeats cannot fan out further.
+		snap = adoptionSnapshot{segment: m.segment, bounds: m.bounds, classes: m.classes, room: len(pending)}
+	}
 	f.mu.Unlock()
+	if len(pending) > 0 {
+		if f.settleDeferred(ctx, sessionID, m, snap, pending) {
+			changed = true
+		}
+	}
 	if changed {
 		f.notify()
 	}
 	return f.policy(), nil
+}
+
+// settleDeferred retries the adoption of runners deferred at OpenSession. A
+// runner still unverifiable stays deferred; one GitHub says is not ours is
+// cancelled on the worker; a verified one is adopted. It reports whether any
+// slot accounting changed.
+func (f *Fleet) settleDeferred(ctx context.Context, sid string, m *member, snap adoptionSnapshot, pending []*workerv1.RunnerState) bool {
+	adopted, rejected, _ := f.verifyAdoptions(ctx, m, snap, pending)
+	f.mu.Lock()
+	var registered []*Reservation
+	for _, r := range adopted {
+		if m.sessionID != sid || m.deferred[r.name] == nil {
+			continue // the session or the runner moved on while we asked GitHub
+		}
+		delete(m.deferred, r.name)
+		m.busy[r.name] = r // the deferred entry already held this slot
+		registered = append(registered, r)
+	}
+	for _, name := range rejected {
+		if m.sessionID != sid || m.deferred[name] == nil {
+			continue
+		}
+		delete(m.deferred, name)
+		f.sendLocked(m, cancelDirective(name, "not recognised by the router"))
+	}
+	f.mu.Unlock()
+	for _, r := range registered {
+		if !f.o.Adopter.Adopt(r.req.Repo, r.req.Class, r) {
+			r.finish(errAdoptionRefused)
+			f.mu.Lock()
+			f.sendLocked(m, cancelDirective(r.name, "adoption refused"))
+			f.mu.Unlock()
+			continue
+		}
+		f.publish(event.EventRunnerAdopted, r.req.Repo, map[string]any{"runner": r.name, "worker": m.name})
+	}
+	return len(registered) > 0 || len(rejected) > 0
 }
 
 // AcceptOffer mints the runner for an offer issued to this session and
