@@ -173,11 +173,31 @@ func (s *Server) Enroll(_ context.Context, req *connect.Request[workerv1.EnrollR
 	}), nil
 }
 
+// Longest runner name and repo a worker may report. Real names are at most 45
+// characters (naming.MaxNameLen) and repos are owner/name; anything longer
+// would only become an oversized GitHub request.
+const (
+	maxRunnerNameLen = 128
+	maxRepoLen       = 256
+)
+
+func checkRunning(running []*workerv1.RunnerState) error {
+	for _, rs := range running {
+		if len(rs.GetRunnerName()) > maxRunnerNameLen || len(rs.GetRepo()) > maxRepoLen {
+			return connect.NewError(connect.CodeInvalidArgument, errors.New("running runner name or repo is too long"))
+		}
+	}
+	return nil
+}
+
 // OpenSession clamps capabilities, reconciles running runners and rejects a
 // second live session.
 func (s *Server) OpenSession(ctx context.Context, req *connect.Request[workerv1.OpenSessionRequest]) (*connect.Response[workerv1.OpenSessionResponse], error) {
 	rec, err := s.authenticate(req.Header())
 	if err != nil {
+		return nil, err
+	}
+	if err := checkRunning(req.Msg.GetRunning()); err != nil {
 		return nil, err
 	}
 	// A long running[] is not refused: a worker whose slots were lowered while
@@ -280,6 +300,9 @@ func (s *Server) Subscribe(ctx context.Context, req *connect.Request[workerv1.Su
 func (s *Server) Heartbeat(ctx context.Context, req *connect.Request[workerv1.HeartbeatRequest]) (*connect.Response[workerv1.HeartbeatResponse], error) {
 	rec, err := s.authenticate(req.Header())
 	if err != nil {
+		return nil, err
+	}
+	if err := checkRunning(req.Msg.GetRunning()); err != nil {
 		return nil, err
 	}
 	policy, err := s.c.Fleet.Heartbeat(ctx, req.Msg.GetSessionId(), rec.ID, req.Msg.GetAvailability(), req.Msg.GetRunning(), req.Msg.GetAcceptPublic())

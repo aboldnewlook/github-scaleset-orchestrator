@@ -50,11 +50,59 @@ func (f *Fleet) applyCapsLocked(m *member) {
 }
 
 type adoptionSnapshot struct {
-	segment string
-	bounds  Bounds
-	classes map[runner.Class]bool
-	room    int
+	workerID string
+	slots    int
+	segment  string
+	bounds   Bounds
+	classes  map[runner.Class]bool
+	room     int
 }
+
+// maxDeferAttempts is how many lookups may fail for one deferred runner
+// before it is cancelled instead of retried.
+const maxDeferAttempts = 5
+
+// deferral is a reported runner the router could not verify yet.
+type deferral struct {
+	rs    *workerv1.RunnerState
+	since time.Time
+	errs  int // lookups that failed
+}
+
+// lookupBudget is a token bucket of GitHub lookups for one worker. It lives on
+// the fleet, keyed by worker ID, so cycling sessions does not refill it.
+// Capacity is the worker's slots; it refills that many tokens per Timing.Lost,
+// so a worker can cost GitHub at most slots lookups per lost-interval however
+// often it opens sessions or heartbeats.
+type lookupBudget struct {
+	tokens float64
+	last   time.Time
+}
+
+func (f *Fleet) takeLookup(workerID string, slots int) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	capacity := float64(max(slots, 1))
+	now := f.o.Now()
+	b := f.budgets[workerID]
+	if b == nil {
+		b = &lookupBudget{tokens: capacity, last: now}
+		f.budgets[workerID] = b
+	}
+	if el := now.Sub(b.last); el > 0 {
+		b.tokens = min(capacity, b.tokens+capacity*el.Seconds()/f.o.Timing.Lost.Seconds())
+	}
+	b.last = now
+	if b.tokens < 1 {
+		return false
+	}
+	b.tokens--
+	return true
+}
+
+// deferCap bounds how long a runner may stay deferred. It reuses the cap on
+// how long a lost worker's started runners are kept.
+func (f *Fleet) deferCap() time.Duration { return f.o.Timing.LostStartedCap }
 
 // OpenSession starts a worker's session (spec §4.3, §7). A second session
 // while the first heartbeated within Timing.Lost is rejected. Runners the
@@ -121,7 +169,7 @@ func (f *Fleet) OpenSession(ctx context.Context, w WorkerRecord, p OpenSessionPa
 		}
 	}
 	m.deferred = nil
-	snap := adoptionSnapshot{segment: m.segment, bounds: m.bounds, classes: m.classes, room: m.free()}
+	snap := adoptionSnapshot{workerID: m.workerID, slots: m.slots, segment: m.segment, bounds: m.bounds, classes: m.classes, room: m.free()}
 	eff := m.caps
 	f.mu.Unlock()
 
@@ -138,15 +186,18 @@ func (f *Fleet) OpenSession(ctx context.Context, w WorkerRecord, p OpenSessionPa
 		m.busy[r.name] = r
 		registered = append(registered, r)
 	}
-	for _, rs := range deferred {
+	for _, d := range deferred {
 		if m.sessionID != sid || m.free() == 0 {
-			rejected = append(rejected, rs.GetRunnerName())
+			rejected = append(rejected, d.rs.GetRunnerName())
 			continue
 		}
 		if m.deferred == nil {
-			m.deferred = map[string]*workerv1.RunnerState{}
+			m.deferred = map[string]*deferral{}
 		}
-		m.deferred[rs.GetRunnerName()] = rs
+		m.deferred[d.rs.GetRunnerName()] = &deferral{rs: d.rs, since: now, errs: d.errs}
+	}
+	if len(m.deferred) > 0 {
+		m.settleAt = now // this round counts as a settle
 	}
 	f.mu.Unlock()
 	for _, r := range registered {
@@ -169,19 +220,22 @@ func (f *Fleet) OpenSession(ctx context.Context, w WorkerRecord, p OpenSessionPa
 type adoptionVerdict int
 
 const (
-	verdictAdopt  adoptionVerdict = iota
-	verdictReject                 // positively not ours, or outside the worker's bounds
-	verdictDefer                  // cannot tell yet: scale set unknown or GitHub unreachable
+	verdictAdopt    adoptionVerdict = iota
+	verdictReject                   // positively not ours, or outside the worker's bounds
+	verdictDefer                    // cannot tell yet: scale set unknown or the worker's lookup budget is spent
+	verdictDeferErr                 // cannot tell yet: the GitHub lookup failed
 )
 
-func (f *Fleet) verifyAdoptions(ctx context.Context, m *member, s adoptionSnapshot, candidates []*workerv1.RunnerState) (adopted []*Reservation, rejected []string, deferred []*workerv1.RunnerState) {
+func (f *Fleet) verifyAdoptions(ctx context.Context, m *member, s adoptionSnapshot, candidates []*workerv1.RunnerState) (adopted []*Reservation, rejected []string, deferred []*deferral) {
 	for _, rs := range candidates {
 		r, v := f.verifyAdoption(ctx, m, &s, rs)
 		switch v {
 		case verdictAdopt:
 			adopted = append(adopted, r)
 		case verdictDefer:
-			deferred = append(deferred, rs)
+			deferred = append(deferred, &deferral{rs: rs})
+		case verdictDeferErr:
+			deferred = append(deferred, &deferral{rs: rs, errs: 1})
 		default:
 			rejected = append(rejected, rs.GetRunnerName())
 		}
@@ -221,10 +275,13 @@ func (f *Fleet) verifyAdoption(ctx context.Context, m *member, s *adoptionSnapsh
 	if s.room <= 0 {
 		return nil, verdictReject
 	}
+	if !f.takeLookup(s.workerID, s.slots) {
+		return nil, verdictDefer // this worker has used its share of GitHub lookups
+	}
 	s.room--
 	ref, err := f.o.GitHub.GetRunnerByName(ctx, repo, name)
 	if err != nil {
-		return nil, verdictDefer
+		return nil, verdictDeferErr
 	}
 	if ref == nil || ref.ScaleSetID != scaleSetID {
 		return nil, verdictReject
@@ -284,28 +341,40 @@ func (f *Fleet) Heartbeat(ctx context.Context, sessionID, workerID string, avail
 		}
 	}
 	var pending []*workerv1.RunnerState
-	var snap adoptionSnapshot
 	if len(m.deferred) > 0 {
-		reported := make(map[string]bool, len(running))
+		current := make(map[string]*workerv1.RunnerState, len(running))
 		for _, rs := range running {
-			reported[rs.GetRunnerName()] = true
+			current[rs.GetRunnerName()] = rs
 		}
-		for name, rs := range m.deferred {
-			if reported[name] {
-				pending = append(pending, rs)
-			} else {
+		now := f.o.Now()
+		for name, d := range m.deferred {
+			cur, reported := current[name]
+			switch {
+			case !reported:
 				delete(m.deferred, name) // it finished
 				changed = true
+			case now.Sub(d.since) >= f.deferCap():
+				// Still unverifiable after the cap (unknown scale set, an
+				// unserved repo, GitHub down for hours): stop holding it.
+				delete(m.deferred, name)
+				f.sendLocked(m, cancelDirective(name, "could not be verified in time"))
+				changed = true
+			default:
+				d.rs = cur // settle what the worker reports now
+				pending = append(pending, cur)
 			}
 		}
-		// One GitHub lookup per deferred runner at most: the budget is the
-		// number of slots they hold, so heartbeats cannot fan out further.
-		snap = adoptionSnapshot{segment: m.segment, bounds: m.bounds, classes: m.classes, room: len(pending)}
 	}
 	f.mu.Unlock()
-	if len(pending) > 0 {
-		if f.settleDeferred(ctx, sessionID, m, snap, pending) {
-			changed = true
+	// Settling is paced, single-flight and skipped while no scale set is
+	// known: Heartbeat RPCs are not rate limited, so they must not be a way to
+	// make the router query GitHub.
+	if len(pending) > 0 && f.anyScaleSetKnown(pending) {
+		if snap, ok := f.claimSettle(m, sessionID); ok {
+			snap.room = len(pending)
+			if f.settleDeferred(ctx, sessionID, m, snap, pending) {
+				changed = true
+			}
 		}
 	}
 	if changed {
@@ -314,13 +383,54 @@ func (f *Fleet) Heartbeat(ctx context.Context, sessionID, workerID string, avail
 	return f.policy(), nil
 }
 
+// anyScaleSetKnown reports whether a lookup could happen for any of the runners.
+func (f *Fleet) anyScaleSetKnown(pending []*workerv1.RunnerState) bool {
+	if f.o.GitHub == nil {
+		return false
+	}
+	for _, rs := range pending {
+		class, err := ClassFromProto(rs.GetClass())
+		if err != nil {
+			continue
+		}
+		if _, ok := f.o.GitHub.ScaleSetID(rs.GetRepo(), class); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// claimSettle admits one settle per member at a time and at most one per
+// heartbeat interval.
+func (f *Fleet) claimSettle(m *member, sid string) (adoptionSnapshot, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	now := f.o.Now()
+	if m.sessionID != sid || m.settling || now.Sub(m.settleAt) < f.o.Timing.Heartbeat {
+		return adoptionSnapshot{}, false
+	}
+	m.settling, m.settleAt = true, now
+	return adoptionSnapshot{workerID: m.workerID, slots: m.slots, segment: m.segment, bounds: m.bounds, classes: m.classes}, true
+}
+
 // settleDeferred retries the adoption of runners deferred at OpenSession. A
 // runner still unverifiable stays deferred; one GitHub says is not ours is
 // cancelled on the worker; a verified one is adopted. It reports whether any
 // slot accounting changed.
 func (f *Fleet) settleDeferred(ctx context.Context, sid string, m *member, snap adoptionSnapshot, pending []*workerv1.RunnerState) bool {
-	adopted, rejected, _ := f.verifyAdoptions(ctx, m, snap, pending)
+	adopted, rejected, still := f.verifyAdoptions(ctx, m, snap, pending)
 	f.mu.Lock()
+	m.settling = false
+	for _, d := range still {
+		name := d.rs.GetRunnerName()
+		cur := m.deferred[name]
+		if m.sessionID != sid || cur == nil || d.errs == 0 {
+			continue
+		}
+		if cur.errs++; cur.errs >= maxDeferAttempts {
+			rejected = append(rejected, name) // the lookup keeps failing for this runner
+		}
+	}
 	var registered []*Reservation
 	for _, r := range adopted {
 		if m.sessionID != sid || m.deferred[r.name] == nil {
