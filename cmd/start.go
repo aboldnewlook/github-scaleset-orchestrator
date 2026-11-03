@@ -23,6 +23,7 @@ var (
 	tlsCert    string
 	tlsKey     string
 	allowCIDRs []string
+	githubSim  string
 	startCmd   = &cobra.Command{
 		Use:   "start",
 		Short: "Start the orchestrator daemon",
@@ -36,6 +37,7 @@ func init() {
 	startCmd.Flags().StringVar(&tlsCert, "tls-cert", "", "path to TLS certificate PEM (overrides auto-generated)")
 	startCmd.Flags().StringVar(&tlsKey, "tls-key", "", "path to TLS private key PEM (overrides auto-generated)")
 	startCmd.Flags().StringSliceVar(&allowCIDRs, "allow-cidr", nil, "allowed CIDR for TCP connections (repeatable)")
+	startCmd.Flags().StringVar(&githubSim, "github-sim", "", "use the gso GitHub simulator at this URL instead of github.com (testing only)")
 }
 
 func runStart(cmd *cobra.Command, args []string) error {
@@ -43,6 +45,9 @@ func runStart(cmd *cobra.Command, args []string) error {
 		Level: slog.LevelInfo,
 	}))
 
+	if err := applyGitHubSimFlag(githubSim); err != nil {
+		return err
+	}
 	cfg, err := config.Load(cfgFile)
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
@@ -69,7 +74,11 @@ func runStart(cmd *cobra.Command, args []string) error {
 	store := event.NewFileStore(filepath.Join(eventsDir, "events.jsonl"))
 	bus := event.NewBus(store)
 
-	rt, err := router.New(cfg, logger, bus, router.Options{})
+	githubFactory := githubFactoryFor(cfg)
+	if githubFactory != nil {
+		logger.Warn("SIMULATED GITHUB: jobs come from the gso simulator, not github.com", "sim", cfg.GitHubSim)
+	}
+	rt, err := router.New(cfg, logger, bus, router.Options{GitHub: githubFactory})
 	if err != nil {
 		return fmt.Errorf("creating router: %w", err)
 	}

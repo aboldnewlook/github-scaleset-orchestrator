@@ -659,6 +659,13 @@ func (c *Client) runOffer(ctx context.Context, sessionID string, o *workerv1.Off
 	}
 	defer unreserve()
 
+	if !validRunnerName(o.GetRunnerName()) {
+		// The name becomes a file and container name; never let the router pick a path.
+		c.logger.Warn("refusing an offer with an unsafe runner name", "repo", o.GetRepo())
+		c.reject(ctx, sessionID, o.GetOfferId(), "runner name is not a plain lowercase token")
+		return
+	}
+
 	actx, cancel := context.WithTimeout(ctx, rpcTimeout)
 	resp, err := c.rpc.AcceptOffer(actx, authed(c, &workerv1.AcceptOfferRequest{SessionId: sessionID, OfferId: o.GetOfferId()}))
 	cancel()

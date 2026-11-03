@@ -172,9 +172,10 @@ func (r *Router) SetJITRepoOverride(repo string) {
 	r.jitRepoOverride = repo
 }
 
-// SetJITHostOverride makes AcceptOffer mint JIT configs whose gitHubUrl and
-// serverUrl point at baseURL (for example "http://127.0.0.1:9300") instead of
-// github.com, as a simulator router would. "" restores the GitHub URLs.
+// SetJITHostOverride makes AcceptOffer mint JIT configs whose serverUrl points
+// at baseURL (for example "http://127.0.0.1:9300") while gitHubUrl stays
+// https://github.com/<repo>, as a simulator router would. "" restores the
+// GitHub URLs.
 func (r *Router) SetJITHostOverride(baseURL string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -213,13 +214,19 @@ func (r *Router) Revoke(name string) {
 // 5 s for one. The offer expires after 2 s.
 func (r *Router) Offer(repo, class string, public bool) (offerID, runnerName string) {
 	r.t.Helper()
+	return r.OfferNamed(repo, class, public, "gso-test-"+randomHex(3))
+}
+
+// OfferNamed is Offer with a caller-chosen runner name, for tests of how a
+// worker treats a hostile or malformed name.
+func (r *Router) OfferNamed(repo, class string, public bool, runnerName string) (offerID, name string) {
+	r.t.Helper()
 	cl, err := runner.ParseClass(class)
 	if err != nil {
 		r.t.Fatalf("workertest: %v", err)
 	}
 	s := r.liveSession()
 	offerID = randomHex(16)
-	runnerName = "gso-test-" + randomHex(3)
 	o := &workerv1.Offer{
 		OfferId:    offerID,
 		RunnerName: runnerName,
@@ -479,7 +486,7 @@ func (r *Router) AcceptOffer(_ context.Context, req *connect.Request[workerv1.Ac
 	}
 	gitHubURL, serverURL := "https://github.com/"+repo, defaultServerURL
 	if r.jitHostOverride != "" {
-		gitHubURL, serverURL = r.jitHostOverride+"/"+repo, r.jitHostOverride
+		serverURL = r.jitHostOverride
 	}
 	r.nextRunnerID++
 	return connect.NewResponse(&workerv1.AcceptOfferResponse{

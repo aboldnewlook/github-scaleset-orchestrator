@@ -97,12 +97,14 @@ func parseJIT(encoded string, trusted []string) (JITInfo, error) {
 var defaultServerSuffixes = []string{"actions.githubusercontent.com", "githubusercontent.com"}
 
 // gitHubURLTrusted: github.com over https with no port, or, with an override,
-// a trusted host over http or https.
+// a trusted host over https. gitHubUrl stays https-only even with an override:
+// the simulator's is always https://github.com/<repo>; only serverUrl may be
+// plain http.
 func gitHubURLTrusted(u *url.URL, trusted []string) bool {
 	if len(trusted) == 0 {
 		return u.Scheme == "https" && strings.ToLower(u.Hostname()) == "github.com" && u.Port() == ""
 	}
-	return (u.Scheme == "https" || u.Scheme == "http") && hostTrusted(u, trusted)
+	return u.Scheme == "https" && hostTrusted(u, trusted)
 }
 
 func serverURLTrusted(u *url.URL, trusted []string) bool {
