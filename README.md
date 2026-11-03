@@ -227,6 +227,8 @@ The CLI is being migrated to Cobra. Current commands:
 | `gso token -set <account>` | Store a PAT in the OS keychain |
 | `gso token -delete <account>` | Remove a PAT from the OS keychain |
 
+Upgrading from a release before remote workers renames scale sets: follow [docs/migrations.md](docs/migrations.md).
+
 Planned commands (under development):
 
 | Command | Description |
@@ -237,6 +239,8 @@ Planned commands (under development):
 | `scaleset list` | List scale sets across repos |
 | `scaleset inspect <id>` | Show scale set details |
 | `scaleset delete <id>` | Delete a scale set |
+| `scaleset list --all` | List every gso-* scale set per repo (current, legacy, other) |
+| `scaleset reset <repo> <class>` | Delete this instance's scale set so the daemon recreates it; refuses while it is live or busy |
 | `runner list` | List active runners |
 | `runner recycle <name>` | Cancel and replace a runner |
 | `runner remove <name>` | Remove a runner |
@@ -386,7 +390,7 @@ go run . -config config.yaml
 
 ### Dependencies
 
-- [`actions/scaleset`](https://github.com/actions/scaleset) v0.2.0 -- Scale Set API client and listener
+- [`actions/scaleset`](https://github.com/actions/scaleset) v0.5.0 -- Scale Set API client and listener
 - [`zalando/go-keyring`](https://github.com/zalando/go-keyring) v0.2.8 -- Cross-platform keychain access
 - [`spf13/cobra`](https://github.com/spf13/cobra) v1.10.2 -- CLI framework
 - [`google/uuid`](https://github.com/google/uuid) v1.6.0 -- Runner name generation
