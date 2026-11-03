@@ -1,6 +1,10 @@
 package worker
 
-import "strings"
+import (
+	"fmt"
+	"regexp"
+	"strings"
+)
 
 // MatchRepo reports whether repo ("owner/name") matches any pattern. A pattern
 // is "owner/*" or "owner/repo", compared case-insensitively. The owner is never
@@ -42,4 +46,33 @@ func splitPattern(s string) (owner, name string, ok bool) {
 		return "", "", false
 	}
 	return parts[0], parts[1], true
+}
+
+// MaxOwnerScopes caps the allowlist entries a router seeds at enrollment.
+const MaxOwnerScopes = 50
+
+var (
+	patternOwner = regexp.MustCompile(`^[A-Za-z0-9-]+$`)
+	patternRepo  = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+)
+
+// ValidPattern reports whether p is exactly "owner/*" or "owner/repo": owner is
+// ASCII [A-Za-z0-9-], repo is ASCII [A-Za-z0-9._-], and nothing else (no
+// whitespace, no other wildcard) is allowed. The error names the entry.
+func ValidPattern(p string) error {
+	owner, name, ok := strings.Cut(p, "/")
+	if ok && patternOwner.MatchString(owner) && (name == "*" || patternRepo.MatchString(name)) {
+		return nil
+	}
+	return fmt.Errorf("invalid allowlist entry %q: want owner/* or owner/repo (owner [A-Za-z0-9-], repo [A-Za-z0-9._-])", p)
+}
+
+// ValidatePatterns returns the first invalid entry's ValidPattern error.
+func ValidatePatterns(patterns []string) error {
+	for _, p := range patterns {
+		if err := ValidPattern(p); err != nil {
+			return err
+		}
+	}
+	return nil
 }

@@ -297,3 +297,13 @@ func TestEnsureEnrolledErrorsDoNotContainTheCode(t *testing.T) {
 		t.Fatalf("malformed join error = %v, must exist and not contain the code", err)
 	}
 }
+
+func TestResolveWorkerSettingsRejectsAnInvalidAllowEntry(t *testing.T) {
+	f := baseWorkerFlags()
+	f.image = "img"
+	f.allow = []string{"acme/*", "acme/re po"}
+	_, err := resolveWorkerSettings(f, changedFlags("image"), envOf(nil), fixedHostname("box"), fixedStateDir("/cfg/gso"))
+	if err == nil || !strings.Contains(err.Error(), "--allow") || !strings.Contains(err.Error(), `"acme/re po"`) {
+		t.Fatalf("error = %v, want one naming --allow and the bad entry", err)
+	}
+}

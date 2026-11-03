@@ -140,6 +140,9 @@ type activeRunner struct {
 
 // New validates cfg and returns a Client. It does not dial.
 func New(cfg Config) (*Client, error) {
+	if err := ValidatePatterns(cfg.Allowlist); err != nil {
+		return nil, fmt.Errorf("worker: %w", err)
+	}
 	switch {
 	case cfg.DialAddr == "":
 		return nil, errors.New("worker: DialAddr is required")

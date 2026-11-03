@@ -334,6 +334,15 @@ func (r *Router) allowNets() ([]*net.IPNet, error) {
 // bounds when it has them, else "owner/*" for every owner the router serves.
 // Owners are folded to lower case, as GitHub and ghsim fold them.
 func (r *Router) ownerScopes(b fleet.Bounds) []string {
+	scopes := r.rawOwnerScopes(b)
+	if len(scopes) > worker.MaxOwnerScopes {
+		r.logger.Warn("truncating owner scopes sent at enrollment", "have", len(scopes), "max", worker.MaxOwnerScopes)
+		scopes = scopes[:worker.MaxOwnerScopes]
+	}
+	return scopes
+}
+
+func (r *Router) rawOwnerScopes(b fleet.Bounds) []string {
 	if len(b.Repos) > 0 {
 		return append([]string(nil), b.Repos...)
 	}
