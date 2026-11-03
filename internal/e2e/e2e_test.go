@@ -290,6 +290,9 @@ func TestRouterRestartWhileGitHubIsDownDefersAdoption(t *testing.T) {
 	if after := len(simRunners(t, sim, "o/a")); after != before {
 		t.Fatalf("minted %d extra runners: the running job was not carried over", after-before)
 	}
+	if !strings.Contains(r.log(), "deferred=1") {
+		t.Fatalf("the restarted router did not defer the runner (this run behaved like scenario 4):\n%s", tail(r.log(), 30))
+	}
 	if strings.Contains(w.log(), "router rejected a running runner") {
 		t.Fatalf("the worker's running runner was rejected:\n%s", tail(w.log(), 20))
 	}
