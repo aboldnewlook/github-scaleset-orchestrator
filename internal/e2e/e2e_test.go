@@ -260,3 +260,39 @@ func TestEnrollmentRejectsAWrongPinAndAReusedCode(t *testing.T) {
 		t.Fatalf("%d workers enrolled from one join string, want 1", count)
 	}
 }
+
+// (8) The router restarts while GitHub is unreachable for longer than the
+// reconnect grace (600 ms at scale 0.02). The worker reconnects meanwhile and
+// reports its running job; the router cannot verify it yet, so it must be
+// deferred, not rejected, and adopted once GitHub is back: no kill, no
+// duplicate mint.
+func TestRouterRestartWhileGitHubIsDownDefersAdoption(t *testing.T) {
+	t.Parallel()
+	sim := startSim(t)
+	gh := newProxy(t, strings.TrimPrefix(sim.URL, "http://"))
+	viaProxy := &simProc{proc: sim.proc, URL: "http://" + gh.Addr(), Advertise: sim.Advertise, admin: sim.admin}
+	r := startRouter(t, viaProxy, defaultRepos)
+	w := startWorker(t, r, "alpha", r.addWorker(t, "alpha", simClass(), 1, ""))
+	waitWorkerConnected(t, r, "alpha")
+
+	id := injectJob(t, sim, "--repo", "o/a", "--duration", "6s")
+	waitJob(t, sim, id, ghsim.JobRunning, 20*time.Second)
+	before := len(simRunners(t, sim, "o/a"))
+
+	gh.Sever(2500 * time.Millisecond) // GitHub is down for four times the grace
+	r.restart(true)
+	waitWorkerConnected(t, r, "alpha")
+	r.waitReady(t) // returns once GitHub is back and the listeners run
+
+	if job := waitJob(t, sim, id, ghsim.JobCompleted, 40*time.Second); job.Result != "succeeded" {
+		t.Fatalf("result = %q", job.Result)
+	}
+	if after := len(simRunners(t, sim, "o/a")); after != before {
+		t.Fatalf("minted %d extra runners: the running job was not carried over", after-before)
+	}
+	if strings.Contains(w.log(), "router rejected a running runner") {
+		t.Fatalf("the worker's running runner was rejected:\n%s", tail(w.log(), 20))
+	}
+	waitIdle(t, r, w, "alpha")
+	waitJob(t, sim, injectJob(t, sim, "--repo", "o/a", "--duration", "500ms"), ghsim.JobCompleted, 30*time.Second)
+}
