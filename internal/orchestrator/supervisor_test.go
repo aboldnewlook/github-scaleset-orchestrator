@@ -442,3 +442,111 @@ func TestWithGitHubNeverResolvesATokenOrBuildsARealClient(t *testing.T) {
 		t.Fatal("the scale set was not created on the simulator")
 	}
 }
+
+// listFailClient fails the first scale-set listing, like a transient GitHub
+// error during the stale check.
+type listFailClient struct {
+	ghapi.Client
+	mu    sync.Mutex
+	calls int
+}
+
+func (c *listFailClient) ListRunnerScaleSets(ctx context.Context, group int) ([]scaleset.RunnerScaleSet, error) {
+	c.mu.Lock()
+	c.calls++
+	first := c.calls == 1
+	c.mu.Unlock()
+	if first {
+		return nil, errors.New("github: 502 Bad Gateway")
+	}
+	return c.Client.ListRunnerScaleSets(ctx, group)
+}
+
+func TestStaleCheckIsRetriedAfterAListError(t *testing.T) {
+	m := newModel()
+	if _, err := m.Client("org/repo").CreateRunnerScaleSet(context.Background(), &scaleset.RunnerScaleSet{Name: "gso-oldhost-repo", RunnerGroupID: 1}); err != nil {
+		t.Fatal(err)
+	}
+	bus := event.NewBus(nil)
+	id, ch := bus.Subscribe(64)
+	defer bus.Unsubscribe(id)
+	tp := &tap{failPolls: 1} // the first poll fails, so the listener restarts
+	inner := tp.factory(m.Factory())
+	factory := func(ctx context.Context, repo config.Repo) (ghapi.Client, error) {
+		c, err := inner(ctx, repo)
+		if err != nil {
+			return nil, err
+		}
+		return &listFailClient{Client: c}, nil
+	}
+	o := newTestOrchestrator(t, factory, bus, fastTiming(), "org/repo")
+	supervise(t, o, "org/repo")
+
+	var got []event.Event
+	eventually(t, "stale_scale_sets alert after the retry", func() bool {
+		for _, e := range drainEvents(ch) {
+			if e.Type == event.EventAlert && strings.Contains(string(e.Payload), "stale_scale_sets") {
+				got = append(got, e)
+			}
+		}
+		return len(got) > 0
+	})
+}
+
+// scriptedSessionClient fails OpenSession with the scripted errors, then
+// passes through.
+type scriptedSessionClient struct {
+	ghapi.Client
+	mu   sync.Mutex
+	errs []error
+}
+
+func (c *scriptedSessionClient) OpenSession(ctx context.Context, id int, owner string) (ghapi.Session, error) {
+	c.mu.Lock()
+	if len(c.errs) > 0 {
+		err := c.errs[0]
+		c.errs = c.errs[1:]
+		c.mu.Unlock()
+		return nil, err
+	}
+	c.mu.Unlock()
+	return c.Client.OpenSession(ctx, id, owner)
+}
+
+// Two 409s then a 502: the failure count restarts at 1 for the new kind of
+// failure rather than adding the conflicts (gso status would show FAILURES 3
+// next to STATE retrying).
+func TestFailureCountRestartsWhenTheFailureKindChanges(t *testing.T) {
+	m := newModel()
+	conflict := fmt.Errorf("creating message session: %w", scaleset.ConflictError)
+	inner := m.Factory()
+	factory := func(ctx context.Context, repo config.Repo) (ghapi.Client, error) {
+		c, err := inner(ctx, repo)
+		if err != nil {
+			return nil, err
+		}
+		return &scriptedSessionClient{Client: c, errs: []error{conflict, conflict, errors.New("github: 502 Bad Gateway")}}, nil
+	}
+	tm := fastTiming()
+	tm.BackoffMin, tm.BackoffMax = 10*time.Second, 10*time.Second // hold in "retrying" after the 502
+	o := newTestOrchestrator(t, factory, nil, tm, "org/repo")
+	supervise(t, o, "org/repo")
+
+	eventually(t, "the 502 recorded", func() bool { return strings.Contains(listenerState(o, "org/repo").LastError, "502") })
+	if st := listenerState(o, "org/repo"); st.Failures != 1 || st.State != "retrying" {
+		t.Fatalf("status after 409, 409, 502 = %+v, want Failures 1 and state retrying", st)
+	}
+}
+
+func TestWithSupervisorTimingFloorsZeroDurations(t *testing.T) {
+	o := New(&config.Config{MaxRunners: 1}, testLogger(), nil, WithSupervisorTiming(SupervisorTiming{}))
+	def := DefaultSupervisorTiming()
+	if o.timing.BackoffMin != def.BackoffMin || o.timing.BackoffMax != def.BackoffMax || o.timing.ConflictWait != def.ConflictWait {
+		t.Fatalf("timing = %+v, want zero durations floored to %+v", o.timing, def)
+	}
+	custom := SupervisorTiming{BackoffMin: time.Millisecond, BackoffMax: 2 * time.Millisecond, ConflictWait: time.Millisecond}
+	o = New(&config.Config{MaxRunners: 1}, testLogger(), nil, WithSupervisorTiming(custom))
+	if o.timing.BackoffMin != time.Millisecond || o.timing.BackoffMax != 2*time.Millisecond || o.timing.ConflictWait != time.Millisecond {
+		t.Fatalf("explicit durations changed: %+v", o.timing)
+	}
+}

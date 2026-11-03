@@ -50,8 +50,22 @@ type Option func(*Orchestrator)
 func WithGitHub(f ghapi.Factory) Option { return func(o *Orchestrator) { o.github = f } }
 
 // WithSupervisorTiming replaces the listener supervisor's retry policy.
+// Zero durations fall back to the defaults, so a zero-value SupervisorTiming
+// cannot spin the retry loop.
 func WithSupervisorTiming(t SupervisorTiming) Option {
-	return func(o *Orchestrator) { o.timing = t }
+	return func(o *Orchestrator) {
+		def := DefaultSupervisorTiming()
+		if t.BackoffMin <= 0 {
+			t.BackoffMin = def.BackoffMin
+		}
+		if t.BackoffMax <= 0 {
+			t.BackoffMax = def.BackoffMax
+		}
+		if t.ConflictWait <= 0 {
+			t.ConflictWait = def.ConflictWait
+		}
+		o.timing = t
+	}
 }
 
 func New(cfg *config.Config, logger *slog.Logger, bus *event.Bus, opts ...Option) *Orchestrator {

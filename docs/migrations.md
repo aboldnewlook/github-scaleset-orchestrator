@@ -14,14 +14,28 @@ The class (`<os>-<arch>`) is `workers.default_class` when set, otherwise the
 host's own class. A router on a Mac that serves Docker or simulator workers
 should set `workers.default_class: linux-x64`.
 
-Labels are unchanged: the configured labels plus the class's OS and arch
-labels.
+Labels are the configured labels plus the class's OS and arch labels. They
+match the old labels only when `workers.default_class` is unset, because the
+labels now follow the class rather than the host.
+
+Set an explicit `runner.instance_id` for containers that do not have a fixed
+hostname (for example subprocess-mode containers); otherwise every restart
+could pick a different name.
 
 ### Upgrade steps
 
-1. Stop the old gso. Its listener holds the session for the old scale set.
-2. In each repository, open Settings, Actions, Runners and delete the old
-   `gso-<hostname>-<repo>` scale sets (the legacy scale sets). With identical
+1. Wait for running jobs to finish, then stop the old gso. Its listener holds
+   the session for the old scale set.
+2. Delete the old `gso-<hostname>-<repo>` scale sets (the legacy scale sets)
+   with gso itself. List them per repo, then delete each by id:
+
+   ```sh
+   gso scaleset list --repo owner/name
+   gso scaleset delete <id> --repo owner/name
+   ```
+
+   The new gso also prints the stale sets as `name (#id)` in its warning and
+   `stale_scale_sets` alert, so you can copy the id from there. With identical
    labels and no session, GitHub may still route jobs to a stale scale set, so
    treat them as an outage risk until they are gone.
 3. Start the new gso. It creates the new scale set.
@@ -38,7 +52,7 @@ recreate the scale set. gso no longer does that: runners placed on workers, or
 adopted after a restart, belong to the scale set. A 409 is now retried every
 30 seconds, up to 10 times, and then every 5 minutes, and the listener is
 marked degraded when the retries run out. If you really need to recreate a
-scale set, use `gso scaleset reset`.
+scale set after a 409, use `gso scaleset reset` (added in a later release).
 
 ### Listener supervision
 

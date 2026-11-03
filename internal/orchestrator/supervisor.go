@@ -74,14 +74,16 @@ func (o *Orchestrator) superviseRepo(ctx context.Context, repo config.Repo, work
 	)
 	started := func(scaleSetID int) {
 		failures, conflicts, backoff = 0, 0, o.timing.BackoffMin
-		o.updateStatus(repo.Name, func(st *control.ListenerLiveStatus) {
-			st.ScaleSetID, st.State, st.Failures, st.LastError = scaleSetID, stateRunning, 0, ""
-		})
+		// Publish before the status flips to running, so anything that waits for
+		// "running" also sees the recovered event.
 		if degraded {
 			degraded = false
 			logger.Info("listener recovered")
 			o.publishListener(event.EventListenerRecovered, repo.Name, name, map[string]any{})
 		}
+		o.updateStatus(repo.Name, func(st *control.ListenerLiveStatus) {
+			st.ScaleSetID, st.State, st.Failures, st.LastError = scaleSetID, stateRunning, 0, ""
+		})
 	}
 
 	for {
@@ -94,8 +96,9 @@ func (o *Orchestrator) superviseRepo(ctx context.Context, repo config.Repo, work
 				client = c
 			}
 			if !checked {
-				checked = true
-				o.warnStaleScaleSets(ctx, client, repo.Name, map[string]bool{name: true}, logger)
+				// Only a successful listing counts, so a transient error does not
+				// suppress the migration warning for the life of the process.
+				checked = o.warnStaleScaleSets(ctx, client, repo.Name, map[string]bool{name: true}, logger)
 			}
 			return o.runListenerOnce(ctx, repo, client, name, &sc, worker, sem, logger, started)
 		}()
@@ -112,6 +115,7 @@ func (o *Orchestrator) superviseRepo(ctx context.Context, repo config.Repo, work
 			// during a redeploy. Never delete the scale set: runners placed on
 			// workers or adopted after a restart belong to it (spec §7, F1).
 			conflicts++
+			failures, backoff = 0, o.timing.BackoffMin // a new kind of failure restarts the other count
 			wait = o.timing.ConflictWait
 			if conflicts > o.timing.ConflictRetries {
 				wait = o.timing.BackoffMax
@@ -119,6 +123,7 @@ func (o *Orchestrator) superviseRepo(ctx context.Context, repo config.Repo, work
 			logger.Warn("message session conflict; retrying without deleting the scale set", "attempt", conflicts, "error", err)
 		} else {
 			failures++
+			conflicts = 0
 			wait = backoff
 			backoff = min(backoff*2, o.timing.BackoffMax)
 			logger.Error("listener stopped; retrying", "failures", failures, "retry_in", wait, "error", err)
@@ -249,11 +254,12 @@ func (o *Orchestrator) newScaler(repo config.Repo, scaleSetID int, client ghapi.
 // current. With identical labels and no session, whether GitHub still routes
 // jobs to them is UNKNOWN (spike b), so the rename treats them as an outage
 // risk (design spec §6.3, docs/migrations.md).
-func (o *Orchestrator) warnStaleScaleSets(ctx context.Context, client ghapi.Client, repo string, current map[string]bool, logger *slog.Logger) {
+// It reports whether the listing succeeded.
+func (o *Orchestrator) warnStaleScaleSets(ctx context.Context, client ghapi.Client, repo string, current map[string]bool, logger *slog.Logger) bool {
 	sets, err := client.ListRunnerScaleSets(ctx, 1)
 	if err != nil {
 		logger.Warn("listing scale sets for the stale check", "error", err)
-		return
+		return false
 	}
 	var stale []string
 	for _, ss := range sets {
@@ -262,13 +268,14 @@ func (o *Orchestrator) warnStaleScaleSets(ctx context.Context, client ghapi.Clie
 		}
 	}
 	if len(stale) == 0 {
-		return
+		return true
 	}
 	logger.Warn("other gso scale sets exist in this repo; delete them if no other gso instance owns them (docs/migrations.md)", "stale", stale)
 	o.publish(event.Event{
 		Time: time.Now(), Type: event.EventAlert, Repo: repo,
 		Payload: mustMarshal(map[string]any{"reason": "stale_scale_sets", "scale_sets": stale}),
 	})
+	return true
 }
 
 func (o *Orchestrator) updateStatus(repo string, f func(*control.ListenerLiveStatus)) {
