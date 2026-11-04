@@ -26,31 +26,64 @@ could pick a different name.
 
 1. Wait for running jobs to finish, then stop the old gso. Its listener holds
    the session for the old scale set.
-2. Delete the old `gso-<hostname>-<repo>` scale sets (the legacy scale sets)
-   with gso itself. List every gso scale set per repo, then delete each stale
-   one by id:
-
-   ```sh
-   gso scaleset list --all --repo owner/name
-   gso scaleset delete <id> --repo owner/name
-   ```
-
-   `KIND` is `current` (a name the new release uses), `legacy` (this host's
-   old name) or `other` (another gso instance's, or an orphan from an earlier
-   container hostname). Delete `legacy` and `other` scale sets only when no
-   other running gso instance owns them. A plain `gso scaleset list` shows only
-   the current name and cannot see orphans.
-
-   The new gso also prints the stale sets as `name (#id)` in its warning and
-   `stale_scale_sets` alert, so you can copy the id from there. With identical
-   labels and no session, GitHub may still route jobs to a stale scale set, so
-   treat them as an outage risk until they are gone.
-3. Start the new gso. It creates the new scale set.
+2. Start the new gso. It creates the new scale set and then **cleans up the
+   old `gso-<hostname>-<repo>` scale sets automatically** (see below). There is
+   nothing to delete by hand.
 
 If you keep several gso instances in the same repository, give each its own
 `runner.instance_id`. After the upgrade gso logs a warning and publishes an
-`alert` event with reason `stale_scale_sets` when it sees other `gso-` scale
-sets in a repo; delete them only when no other gso instance owns them.
+`alert` event with reason `stale_scale_sets` for any other `gso-` scale sets it
+sees in a repo and did not delete.
+
+### Automatic cleanup of old scale sets
+
+With the old release's scale sets lingering, GitHub can still route jobs to
+them while nothing serves them, so treat them as an outage risk until they are
+gone. Once the router has ensured its own scale set for a repo, it deletes an
+old scale set only when **all** of these hold:
+
+- it is in a configured repo, its name starts with `gso-`, and it is not in
+  the current naming form `gso-<instance>-<repo>-<os>-<arch>`. A current-form
+  set of any instance, and any set not named `gso-...`, is never touched;
+- GitHub reports statistics for it and they show no assigned, acquired or
+  running jobs and no busy runners (missing statistics, or an error, means
+  skip);
+- the router can open a message session on it. A 409 means a live listener
+  owns it, so it is kept. The router closes the session before deleting.
+
+`KIND` cannot prove ownership: the old release ran in a container whose
+hostname was a random container ID, so its sets show as `other` in
+`gso scaleset list --all`, not `legacy`. That is why the rules above, not the
+kind, decide.
+
+Each deletion is logged at INFO (`deleted stale scale set`, with name, id and
+repo) and published as a `scaleset.deleted` event. Sets it had to skip are
+retried a few times with backoff (1, 2, 4, 8 and 16 minutes, so about 30
+minutes after start), then left alone. The `stale_scale_sets` warning and
+alert list each remaining set as `name (#id)` with the reason it was skipped
+(`skipped` in the alert payload).
+
+**Opt out.** Set `cleanup_stale_scale_sets: false` in the config file, or
+`GSO_CLEANUP_STALE_SCALE_SETS=false`. The router then deletes nothing and
+keeps only the warning and alert (which says auto-cleanup is off). The default
+is `true`.
+
+**Clean up manually.** For a set the router skipped, or with cleanup off, list
+every gso scale set per repo and delete each stale one by id:
+
+```sh
+gso scaleset list --all --repo owner/name
+gso scaleset delete <id> --repo owner/name
+```
+
+`KIND` is `current` (a name the new release uses), `legacy` (this host's old
+name) or `other` (another gso instance's, or an orphan from an earlier
+container hostname). Delete `legacy` and `other` scale sets only when no other
+running gso instance owns them. A plain `gso scaleset list` shows only the
+current name and cannot see orphans.
+
+Auto-cleanup needs the real GitHub API; with a simulated GitHub
+(`--github-sim`) it is unavailable and sets are only reported.
 
 ### 409 conflicts no longer delete the scale set
 
