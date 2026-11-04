@@ -158,6 +158,21 @@ func OpenRegistry(path string) (*Registry, error) {
 	return r, nil
 }
 
+// PendingExpiry returns when the pending enrollment code for name expires. A
+// code that was replaced (another AddEnrollment for the name), redeemed or
+// pruned is gone, so a caller holding an earlier expiry can tell its own code
+// is no longer the live one.
+func (r *Registry) PendingExpiry(name string) (time.Time, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, p := range r.codes {
+		if p.name == name {
+			return p.expires, true
+		}
+	}
+	return time.Time{}, false
+}
+
 // ValidWorkerName reports whether name may be enrolled, with the same rule
 // AddEnrollment applies.
 func ValidWorkerName(name string) error {

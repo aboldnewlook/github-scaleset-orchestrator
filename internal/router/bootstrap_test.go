@@ -3,6 +3,7 @@ package router
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -290,4 +291,215 @@ func remoteWorkers(r *Router) []control.WorkerLiveStatus {
 		}
 	}
 	return out
+}
+
+func waitDone(t *testing.T, r *Router, what string) {
+	t.Helper()
+	select {
+	case <-r.bootstrapDone:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("the bootstrap loop did not end: %s", what)
+	}
+}
+
+func loopEnded(r *Router) bool {
+	select {
+	case <-r.bootstrapDone:
+		return true
+	default:
+		return false
+	}
+}
+
+func runInBackground(r *Router, ctx context.Context) chan error {
+	r.runOrchestrator = func(ctx context.Context) error {
+		<-ctx.Done()
+		return nil
+	}
+	done := make(chan error, 1)
+	go func() { done <- r.Run(ctx) }()
+	return done
+}
+
+func TestBootstrapLoopIsJoinedWhenTheContextIsCancelled(t *testing.T) {
+	joinFile := filepath.Join(t.TempDir(), "join")
+	r, _ := newBootstrapRouter(t, loadTestConfig(t, bootstrapYAML(joinFile)), "")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := runInBackground(r, ctx)
+	waitFor(t, "the join file", func() bool { return fileExists(joinFile) })
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return")
+	}
+	if !loopEnded(r) {
+		t.Fatal("Run returned while the bootstrap loop was still running")
+	}
+}
+
+func TestBootstrapLoopIsJoinedWhenTheOrchestratorEndsFirst(t *testing.T) {
+	joinFile := filepath.Join(t.TempDir(), "join")
+	r, _ := newBootstrapRouter(t, loadTestConfig(t, bootstrapYAML(joinFile)), "")
+	want := errors.New("orchestrator failed")
+	r.runOrchestrator = func(ctx context.Context) error {
+		for !fileExists(joinFile) {
+			time.Sleep(5 * time.Millisecond)
+		}
+		return want
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel() // never cancelled before Run returns
+	if err := r.Run(ctx); !errors.Is(err, want) {
+		t.Fatalf("Run = %v, want the orchestrator's error", err)
+	}
+	if !loopEnded(r) {
+		t.Fatal("Run returned while the bootstrap loop was still running")
+	}
+}
+
+// enrollDirect enrolls name in the live registry, as a worker redeeming a code would.
+func enrollDirect(t *testing.T, reg *fleet.Registry, name string) {
+	t.Helper()
+	b := fleet.Bounds{Classes: []runner.Class{{OS: "linux", Arch: "x64"}}, MaxSlots: 2}
+	code, _, err := reg.AddEnrollment(name, b, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := reg.Enroll(code, name, "m", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestBootstrapTreatsAnEnrollmentRaceAsEnrolled(t *testing.T) {
+	joinFile := filepath.Join(t.TempDir(), "join")
+	r, logs := newBootstrapRouter(t, loadTestConfig(t, bootstrapYAML(joinFile)), "")
+	// The worker enrolls (some other way) after the loop saw "pending" and
+	// before it mints: the mint then fails with ErrNameTaken.
+	r.bootstrapBeforeMint = func() { enrollDirect(t, r.registry, sibling) }
+	startWorkerSide(t, r)
+	waitDone(t, r, "the name was enrolled between the check and the mint")
+	if fileExists(joinFile) {
+		t.Fatal("a join file is left for an enrolled worker")
+	}
+	if out := logs.String(); strings.Contains(out, "level=WARN") || strings.Contains(out, "level=ERROR") {
+		t.Errorf("benign race logged a warning:\n%s", out)
+	}
+}
+
+func TestBootstrapStopsOnANameSegmentCollision(t *testing.T) {
+	stateDir := t.TempDir()
+	seedRegistry(t, stateDir, "un-raid") // same runner segment as "unraid"
+	joinFile := filepath.Join(t.TempDir(), "join")
+	r, logs := newBootstrapRouter(t, loadTestConfig(t, bootstrapYAML(joinFile)), stateDir)
+	r.cfg.Workers.Bootstrap.Name = "unraid"
+	plan, err := r.newBootstrapPlan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.bootstrap = plan
+	startWorkerSide(t, r)
+	waitDone(t, r, "a colliding name")
+	if fileExists(joinFile) {
+		t.Fatal("a join file was written for a colliding name")
+	}
+	out := logs.String()
+	if n := strings.Count(out, "un-raid"); n != 1 || !strings.Contains(out, "level=WARN") {
+		t.Errorf("want one WARN naming the colliding worker \"un-raid\", got %d mentions:\n%s", n, out)
+	}
+}
+
+func TestBootstrapGivesUpAndRemovesTheFile(t *testing.T) {
+	joinFile := filepath.Join(t.TempDir(), "join")
+	r, logs := newBootstrapRouter(t, loadTestConfig(t, bootstrapYAML(joinFile)), "")
+	r.bootstrapGiveUp = 200 * time.Millisecond
+	startWorkerSide(t, r)
+	waitDone(t, r, "the sibling never enrolled")
+	if fileExists(joinFile) {
+		t.Fatal("the join file survives the give-up")
+	}
+	out := logs.String()
+	if !strings.Contains(out, "level=WARN") || !strings.Contains(out, "gave up") || !strings.Contains(out, "restart") {
+		t.Errorf("no WARN saying bootstrap gave up until the next restart:\n%s", out)
+	}
+}
+
+func TestBootstrapRewritesTheFileWhenAnAdminReplacesThePendingCode(t *testing.T) {
+	joinFile := filepath.Join(t.TempDir(), "join")
+	r, logs := newBootstrapRouter(t, loadTestConfig(t, bootstrapYAML(joinFile)), "")
+	ctx := startWorkerSide(t, r)
+	waitFor(t, "the join file", func() bool { return fileExists(joinFile) })
+	first := readJoin(t, joinFile)
+
+	// `gso workers add sibling` replaces the pending code the file holds.
+	res, err := r.AddWorker(ctx, control.WorkersAddParams{Name: sibling, Classes: []string{"linux-x64"}, Slots: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin, _ := worker.ParseJoin(res.Join)
+	waitFor(t, "the join file to be rewritten", func() bool {
+		b, err := os.ReadFile(joinFile)
+		if err != nil {
+			return false
+		}
+		j, err := worker.ParseJoin(string(b))
+		return err == nil && j.Code != first.Code && j.Code != admin.Code
+	})
+	if err := enroll(ctx, r, readJoin(t, joinFile)); err != nil {
+		t.Fatalf("the rewritten code does not enroll: %v", err)
+	}
+	if out := logs.String(); !strings.Contains(out, "replaced") {
+		t.Errorf("the replacement was not logged:\n%s", out)
+	}
+}
+
+func TestBootstrapReportsAnUnwritableDirectoryOnceAndBacksOff(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs a non-root POSIX user to make a directory unwritable")
+	}
+	dir := filepath.Join(t.TempDir(), "bootstrap")
+	if err := os.Mkdir(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	r, logs := newBootstrapRouter(t, loadTestConfig(t, bootstrapYAML(filepath.Join(dir, "join"))), "")
+	r.bootstrapBackoff = time.Hour
+	startWorkerSide(t, r)
+	waitFor(t, "an ERROR log", func() bool { return strings.Contains(logs.String(), "level=ERROR") })
+	time.Sleep(300 * time.Millisecond) // ~30 polls
+	out := logs.String()
+	if n := strings.Count(out, "level=ERROR"); n != 1 {
+		t.Errorf("%d ERROR lines, want exactly 1:\n%s", n, out)
+	}
+	if !strings.Contains(out, dir) || !strings.Contains(out, "gso-bootstrap volume") {
+		t.Errorf("the ERROR must name the directory and the fix (remove the gso-bootstrap volume and redeploy):\n%s", out)
+	}
+	if strings.Contains(out, "level=WARN") {
+		t.Errorf("warned instead of backing off:\n%s", out)
+	}
+}
+
+func TestBootstrapRefusesUnsafeJoinFilePaths(t *testing.T) {
+	stateDir := t.TempDir()
+	tests := []struct {
+		name, path, wantErr string
+	}{
+		{"relative", "bootstrap/join", "absolute"},
+		{"not clean", "/bootstrap/../bootstrap/join", "clean"},
+		{"under the state dir", filepath.Join(stateDir, "workers.json"), "state"},
+		{"the state dir tls key", filepath.Join(stateDir, "workers", "tls", "key.pem"), "state"},
+		{"under /etc/gso", "/etc/gso/config.yaml", "/etc/gso"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := New(loadTestConfig(t, bootstrapYAML(tt.path)), nil, nil, Options{StateDir: stateDir, FleetTiming: fastTiming()})
+			if err == nil || !strings.Contains(err.Error(), "workers.bootstrap.join_file") || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("New() error = %v, want a workers.bootstrap.join_file error mentioning %q", err, tt.wantErr)
+			}
+		})
+	}
 }

@@ -44,6 +44,7 @@ type workerSettings struct {
 	JoinFile        string        // file the router's bootstrap writes the join string to
 	JoinPoll        time.Duration // how often to look for JoinFile
 	JoinLogEvery    time.Duration // how often to say the worker is still waiting
+	JoinHintAfter   time.Duration // after this long waiting, say what to do if the worker lost its state
 	Router          string
 	Name            string
 	StateDir        string
@@ -125,6 +126,7 @@ func resolveWorkerSettings(f workerFlags, changed func(string) bool, getenv func
 		JoinFile:        str("join-file", "GSO_WORKER_JOIN_FILE", f.joinFile),
 		JoinPoll:        joinFilePoll,
 		JoinLogEvery:    joinFileLogEvery,
+		JoinHintAfter:   joinFileHintAfter,
 		Router:          str("router", "GSO_WORKER_ROUTER", f.router),
 		Name:            str("name", "GSO_WORKER_NAME", f.name),
 		StateDir:        strings.TrimSpace(f.stateDir),
@@ -382,21 +384,28 @@ func ensureEnrolled(ctx context.Context, s workerSettings, store worker.Credenti
 const (
 	joinFilePoll     = 3 * time.Second
 	joinFileLogEvery = time.Minute
+	// After this long without a join file, the periodic line says what to do
+	// if the worker lost its saved state.
+	joinFileHintAfter = 5 * time.Minute
 )
 
 // waitForJoinFile blocks until s.JoinFile exists and has content, then returns
 // that content (the join string, a secret: never printed). It returns early
 // with ctx's error. A read error other than "not there yet" is returned.
 func waitForJoinFile(ctx context.Context, s workerSettings, out io.Writer) (string, error) {
+	start := time.Now()
 	announce := func() {
 		_, _ = fmt.Fprintf(out, "Waiting for the router to write a join string to %s\n", s.JoinFile)
+		if s.JoinHintAfter > 0 && time.Since(start) >= s.JoinHintAfter {
+			_, _ = fmt.Fprintf(out, "Still waiting after %s. If the router's log says \"bootstrap: worker is enrolled\", this worker's saved state was lost and the router will not write a new file for a worker it already has. Revoke it with `gso workers revoke <name>` (<name> is workers.bootstrap.name: unraid in the compose file), delete this worker's state volume, then follow \"Re-enrolling the Unraid worker\" in docs/unraid-portainer.md.\n", time.Since(start).Round(time.Second))
+		}
 	}
 	announce()
 	poll := time.NewTicker(s.JoinPoll)
 	defer poll.Stop()
 	lastLog := time.Now()
 	for {
-		b, err := os.ReadFile(s.JoinFile)
+		b, err := readJoinFile(s.JoinFile)
 		switch {
 		case err == nil:
 			if v := strings.TrimSpace(string(b)); v != "" {
@@ -415,6 +424,27 @@ func waitForJoinFile(ctx context.Context, s workerSettings, out io.Writer) (stri
 			lastLog = time.Now()
 		}
 	}
+}
+
+// maxJoinFileSize bounds what the worker reads from a join file: a join string
+// is well under 200 bytes, so anything bigger is not one (and is not slurped
+// into memory from a file someone else controls).
+const maxJoinFileSize = 4 << 10
+
+func readJoinFile(path string) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	b, err := io.ReadAll(io.LimitReader(f, maxJoinFileSize+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(b) > maxJoinFileSize {
+		return nil, errors.New("the file is larger than 4 KiB, so it is not a join string")
+	}
+	return b, nil
 }
 
 // loadOrCreateMachineID returns a random ID that identifies this installation

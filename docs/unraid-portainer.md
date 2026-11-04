@@ -128,6 +128,11 @@ Things worth knowing:
 
 - If `unraid` is already enrolled when the router starts, the router does nothing.
 - If `unraid` has been **revoked**, the router does **not** enroll it again, and says so once in its log. Revocation sticks (see below).
+- If the worker has not enrolled after 24 hours, the router stops, deletes the file and logs a warning; restart the router to start again.
+- If you run `gso workers add unraid` while the file is waiting, the router notices and writes a new join string to the file within about 10 seconds. That replaces (and so invalidates) the string you were just given.
+- If the router cannot write to `/bootstrap` (for example a `gso-bootstrap` volume created earlier and owned by root), it logs one error naming the directory. Remove the `gso-bootstrap` volume and redeploy. It then retries every few minutes.
+- If another worker's name matches `unraid` once hyphens are removed (for example `un-raid`), the router logs which worker collides and stops. Rename `GSO_WORKERS_BOOTSTRAP_NAME` or revoke that worker.
+- If the worker waits more than five minutes, its log line says what to check. In short: if the router logged `bootstrap: worker is enrolled`, the worker lost its saved state; follow "Re-enrolling the Unraid worker" below.
 - The `gso-bootstrap` volume holds a live single-use enrollment code until the worker enrolls. Anyone who can mount that volume can enroll under the name `unraid`. That is the same trust level as access to the Docker host, and only the router and the worker mount the volume (the worker read-only).
 - `GSO_WORKER_JOIN`, if you set it, wins over the file. Remote workers on other machines are unaffected: they keep using join strings from `gso workers add`.
 
