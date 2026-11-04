@@ -42,14 +42,19 @@ them while nothing serves them, so treat them as an outage risk until they are
 gone. Once the router has ensured its own scale set for a repo, it deletes an
 old scale set only when **all** of these hold:
 
-- it is in a configured repo, its name starts with `gso-`, and it is not in
-  the current naming form `gso-<instance>-<repo>-<os>-<arch>`. A current-form
-  set of any instance, and any set not named `gso-...`, is never touched;
+- it is in a configured repo and its name has the old shape
+  `gso-<hostname>-<repo>` (starts with `gso-`, ends with the repo's short
+  name), and it is not in the current naming form
+  `gso-<instance>-<repo>-<os>-<arch>`. A current-form set of any instance, any
+  other `gso-...` name (say, another tool's `gso-foreign-tool`), and any set not
+  named `gso-...`, is never touched;
 - GitHub reports statistics for it and they show no assigned, acquired or
   running jobs and no busy runners (missing statistics, or an error, means
   skip);
 - the router can open a message session on it. A 409 means a live listener
-  owns it, so it is kept. The router closes the session before deleting.
+  owns it, so it is kept. The router holds that session while it deletes the
+  set, then closes it (a close error after a successful delete is only
+  logged).
 
 `KIND` cannot prove ownership: the old release ran in a container whose
 hostname was a random container ID, so its sets show as `other` in

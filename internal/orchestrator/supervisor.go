@@ -113,13 +113,12 @@ func (o *Orchestrator) superviseRepo(ctx context.Context, repo config.Repo) {
 				}
 				client = c
 			}
-			if !checked && o.cleanupEnabled() {
-				checked = true // the cleanup reports what it leaves alone
-			}
-			if !checked {
-				// Only a successful listing counts, so a transient error does not
-				// suppress the migration warning for the life of the process.
-				checked = o.warnStaleScaleSets(ctx, client, repo.Name, map[string]bool{name: true}, logger)
+			if !checked && !o.cleanupEnabled() {
+				// With cleanup on, the cleanup reports what it leaves alone once
+				// the current scale set exists. Only a successful listing counts,
+				// so a transient error does not suppress the migration warning for
+				// the life of the process.
+				checked = o.warnStaleScaleSets(ctx, client, repo.Name, map[string]bool{name: true}, o.noCleanupReason(), logger)
 			}
 			return o.runListenerOnce(ctx, repo, client, name, &sc, logger, started)
 		}()
@@ -151,6 +150,12 @@ func (o *Orchestrator) superviseRepo(ctx context.Context, repo config.Repo) {
 		}
 
 		degrade := conflicts > o.timing.ConflictRetries || failures >= o.timing.DegradeAfter
+		if degrade && !cleaning && !checked && o.cleanupEnabled() && client != nil {
+			// The current scale set never started, so the cleanup has not run and
+			// will not report: fall back to the plain warning.
+			checked = o.warnStaleScaleSets(ctx, client, repo.Name, map[string]bool{name: true},
+				"auto-cleanup has not run because the current scale set's listener has not started", logger)
+		}
 		o.updateStatus(repo.Name, func(st *control.ListenerLiveStatus) {
 			st.Failures, st.LastError, st.State = failures+conflicts, err.Error(), stateRetrying
 			if degrade || degraded {
@@ -274,7 +279,7 @@ func (o *Orchestrator) labels() []scaleset.Label {
 // jobs to them is UNKNOWN (spike b), so the rename treats them as an outage
 // risk (design spec §6.3, docs/migrations.md).
 // It reports whether the listing succeeded.
-func (o *Orchestrator) warnStaleScaleSets(ctx context.Context, client ghapi.Client, repo string, current map[string]bool, logger *slog.Logger) bool {
+func (o *Orchestrator) warnStaleScaleSets(ctx context.Context, client ghapi.Client, repo string, current map[string]bool, why string, logger *slog.Logger) bool {
 	sets, err := client.ListRunnerScaleSets(ctx, 1)
 	if err != nil {
 		logger.Warn("listing scale sets for the stale check", "error", err)
@@ -288,10 +293,6 @@ func (o *Orchestrator) warnStaleScaleSets(ctx context.Context, client ghapi.Clie
 	}
 	if len(stale) == 0 {
 		return true
-	}
-	why := "auto-cleanup is off (cleanup_stale_scale_sets: false / GSO_CLEANUP_STALE_SCALE_SETS=false)"
-	if o.cfg.CleanupStaleScaleSets {
-		why = "auto-cleanup is unavailable (no scale-set deleter, e.g. a simulated GitHub)"
 	}
 	logger.Warn("other gso scale sets exist in this repo and were not auto-deleted; delete them if no other gso instance owns them (docs/migrations.md): "+why, "stale", stale)
 	o.publish(event.Event{

@@ -18,12 +18,22 @@ import (
 
 // Why a stale scale set is left alone. Only the first is final; the rest are
 // retried because the situation can change (a listener exits, jobs finish).
+const reasonNotPreInstance = "is not a pre-instance name (gso-<hostname>-<repo>), so it may belong to another tool; never auto-deleted"
+
 const reasonCurrentForm = "has a current-form name (an instance-era set, possibly another instance's); never auto-deleted"
 
 // cleanupEnabled reports whether this router may delete orphaned scale sets:
 // the config allows it and a deleter is available.
 func (o *Orchestrator) cleanupEnabled() bool {
 	return o.cfg.CleanupStaleScaleSets && o.deleter != nil
+}
+
+// noCleanupReason says why auto-cleanup will not run, for the plain warning.
+func (o *Orchestrator) noCleanupReason() string {
+	if o.cfg.CleanupStaleScaleSets {
+		return "auto-cleanup is unavailable (no scale-set deleter, e.g. a simulated GitHub)"
+	}
+	return "auto-cleanup is off (cleanup_stale_scale_sets: false / GSO_CLEANUP_STALE_SCALE_SETS=false)"
 }
 
 // cleanupStaleScaleSets removes orphaned pre-instance-era scale sets
@@ -36,12 +46,15 @@ func (o *Orchestrator) cleanupEnabled() bool {
 //
 //   - it is gso-prefixed, in this configured repo, not this router's own
 //     scale set, and its name is NOT instance-era (no "-<os>-<arch>" suffix),
-//     so it is never a current-form set of any instance;
+//     so it is never a current-form set of any instance, and it has the
+//     pre-instance shape gso-<hostname>-<repo short name> (it ends in
+//     "-<repo short name>"), so another tool's gso-* set is left alone;
 //   - GitHub's statistics are present and show no assigned, acquired or
 //     running jobs and no busy runners, both in the listing and again in the
 //     message session below (missing statistics or an error means skip);
 //   - the router can open a message session on it (a 409 means a live
-//     listener owns it: skip). The session is closed before the delete.
+//     listener owns it: skip). The session is held across the
+//     delete (so nothing can open the set in between) and closed after it.
 //
 // KIND alone cannot prove ownership: the single-container release used a
 // random container ID as hostname, so its sets look like another instance's.
@@ -96,6 +109,11 @@ func (o *Orchestrator) cleanupPass(ctx context.Context, repo config.Repo, client
 			skipped[label] = reasonCurrentForm
 			continue
 		}
+		// Every pre-instance release named its sets gso-<hostname>-<repo short name>.
+		if !strings.HasSuffix(ss.Name, "-"+naming.RepoShortName(repo.Name)) {
+			skipped[label] = reasonNotPreInstance
+			continue
+		}
 		reason := o.deleteIfOrphaned(ctx, repo, client, ss, logger)
 		if reason != "" {
 			skipped[label] = reason
@@ -118,22 +136,35 @@ func (o *Orchestrator) deleteIfOrphaned(ctx context.Context, repo config.Repo, c
 		}
 		return fmt.Sprintf("could not open a message session to check for a live listener: %v", err)
 	}
-	// The session's statistics are the last read before the delete.
-	fresh := busyReason(session.Session().Statistics)
-	closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-	defer cancel()
-	if err := session.Close(closeCtx); err != nil {
-		return fmt.Sprintf("could not close the check session: %v", err)
+	// Hold the session across the delete, so nothing can open the set in
+	// between, and close it afterwards even if ctx is cancelled. GitHub accepts
+	// a delete while a session is open, and the set takes the session with it,
+	// so a Close error after a successful delete is only logged.
+	closeSession := func() error {
+		closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancel()
+		return session.Close(closeCtx)
 	}
-	if fresh != "" {
+	// The session's statistics are the last read before the delete.
+	if fresh := busyReason(session.Session().Statistics); fresh != "" {
+		if err := closeSession(); err != nil {
+			logger.Warn("closing the check session", "name", ss.Name, "id", ss.ID, "error", err)
+		}
 		return fresh
 	}
 	del, err := o.deleter(ctx, repo)
-	if err != nil {
-		return fmt.Sprintf("no deleter: %v", err)
+	if err == nil {
+		err = del.DeleteRunnerScaleSet(ctx, ss.ID)
 	}
-	if err := del.DeleteRunnerScaleSet(ctx, ss.ID); err != nil {
+	closeErr := closeSession()
+	if err != nil {
+		if closeErr != nil {
+			logger.Warn("closing the check session", "name", ss.Name, "id", ss.ID, "error", closeErr)
+		}
 		return fmt.Sprintf("delete failed: %v", err)
+	}
+	if closeErr != nil {
+		logger.Warn("closing the check session after the delete", "name", ss.Name, "id", ss.ID, "error", closeErr)
 	}
 	logger.Info("deleted stale scale set", "name", ss.Name, "id", ss.ID, "repo", repo.Name)
 	o.publish(event.Event{
