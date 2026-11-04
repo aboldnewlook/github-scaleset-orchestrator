@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aboldnewlook/github-scaleset-orchestrator/internal/buildinfo"
@@ -28,6 +29,12 @@ import (
 type SupervisorTiming struct {
 	BackoffMin, BackoffMax, ConflictWait time.Duration
 	ConflictRetries, DegradeAfter        int
+
+	// Stale scale-set cleanup: skipped sets are retried CleanupRetries times,
+	// the first after CleanupBackoff and each later one after twice the
+	// previous wait.
+	CleanupBackoff time.Duration
+	CleanupRetries int
 }
 
 // DefaultSupervisorTiming: back off 1 s → 5 min; on a 409 wait 30 s, up to
@@ -40,6 +47,9 @@ func DefaultSupervisorTiming() SupervisorTiming {
 		ConflictWait:    timing.Scale(30 * time.Second),
 		ConflictRetries: 10,
 		DegradeAfter:    3,
+		// 1 + 2 + 4 + 8 + 16 minutes: skipped sets are retried for ~31 minutes.
+		CleanupBackoff: timing.Scale(time.Minute),
+		CleanupRetries: 5,
 	}
 }
 
@@ -70,9 +80,17 @@ func (o *Orchestrator) superviseRepo(ctx context.Context, repo config.Repo) {
 		conflicts int // consecutive 409 session conflicts
 		degraded  bool
 		checked   bool // stale scale-set check done
+		cleaning  bool // stale scale-set cleanup launched
 		backoff   = o.timing.BackoffMin
 	)
+	var cleanup sync.WaitGroup
+	defer cleanup.Wait()
 	started := func(scaleSetID int) {
+		// The current scale set exists now: clean up orphans, once per process.
+		if !cleaning && o.cleanupEnabled() {
+			cleaning = true
+			cleanup.Go(func() { o.cleanupStaleScaleSets(ctx, repo, client, name, logger) })
+		}
 		failures, conflicts, backoff = 0, 0, o.timing.BackoffMin
 		// Publish before the status flips to running, so anything that waits for
 		// "running" also sees the recovered event.
@@ -95,10 +113,12 @@ func (o *Orchestrator) superviseRepo(ctx context.Context, repo config.Repo) {
 				}
 				client = c
 			}
-			if !checked {
-				// Only a successful listing counts, so a transient error does not
-				// suppress the migration warning for the life of the process.
-				checked = o.warnStaleScaleSets(ctx, client, repo.Name, map[string]bool{name: true}, logger)
+			if !checked && !o.cleanupEnabled() {
+				// With cleanup on, the cleanup reports what it leaves alone once
+				// the current scale set exists. Only a successful listing counts,
+				// so a transient error does not suppress the migration warning for
+				// the life of the process.
+				checked = o.warnStaleScaleSets(ctx, client, repo.Name, map[string]bool{name: true}, o.noCleanupReason(), logger)
 			}
 			return o.runListenerOnce(ctx, repo, client, name, &sc, logger, started)
 		}()
@@ -130,6 +150,12 @@ func (o *Orchestrator) superviseRepo(ctx context.Context, repo config.Repo) {
 		}
 
 		degrade := conflicts > o.timing.ConflictRetries || failures >= o.timing.DegradeAfter
+		if degrade && !cleaning && !checked && o.cleanupEnabled() && client != nil {
+			// The current scale set never started, so the cleanup has not run and
+			// will not report: fall back to the plain warning.
+			checked = o.warnStaleScaleSets(ctx, client, repo.Name, map[string]bool{name: true},
+				"auto-cleanup has not run because the current scale set's listener has not started", logger)
+		}
 		o.updateStatus(repo.Name, func(st *control.ListenerLiveStatus) {
 			st.Failures, st.LastError, st.State = failures+conflicts, err.Error(), stateRetrying
 			if degrade || degraded {
@@ -253,7 +279,7 @@ func (o *Orchestrator) labels() []scaleset.Label {
 // jobs to them is UNKNOWN (spike b), so the rename treats them as an outage
 // risk (design spec §6.3, docs/migrations.md).
 // It reports whether the listing succeeded.
-func (o *Orchestrator) warnStaleScaleSets(ctx context.Context, client ghapi.Client, repo string, current map[string]bool, logger *slog.Logger) bool {
+func (o *Orchestrator) warnStaleScaleSets(ctx context.Context, client ghapi.Client, repo string, current map[string]bool, why string, logger *slog.Logger) bool {
 	sets, err := client.ListRunnerScaleSets(ctx, 1)
 	if err != nil {
 		logger.Warn("listing scale sets for the stale check", "error", err)
@@ -268,10 +294,10 @@ func (o *Orchestrator) warnStaleScaleSets(ctx context.Context, client ghapi.Clie
 	if len(stale) == 0 {
 		return true
 	}
-	logger.Warn("other gso scale sets exist in this repo; delete them if no other gso instance owns them (docs/migrations.md)", "stale", stale)
+	logger.Warn("other gso scale sets exist in this repo and were not auto-deleted; delete them if no other gso instance owns them (docs/migrations.md): "+why, "stale", stale)
 	o.publish(event.Event{
 		Time: time.Now(), Type: event.EventAlert, Repo: repo,
-		Payload: mustMarshal(map[string]any{"reason": "stale_scale_sets", "scale_sets": stale}),
+		Payload: mustMarshal(map[string]any{"reason": "stale_scale_sets", "scale_sets": stale, "auto_cleanup": false}),
 	})
 	return true
 }

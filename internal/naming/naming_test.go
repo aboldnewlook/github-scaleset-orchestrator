@@ -129,3 +129,22 @@ func TestRunnerWorkerSegment(t *testing.T) {
 		}
 	}
 }
+
+func TestHasClassSuffix(t *testing.T) {
+	tests := []struct {
+		name string
+		want bool
+	}{
+		{ScaleSetNameFor("unraid", "o/myrepo", runner.Class{OS: "linux", Arch: "x64"}), true},
+		{ScaleSetNameFor("a-very-long-instance-name", "o/a-very-long-repository-name", runner.Class{OS: "macos", Arch: "arm64"}), true},
+		{"gso-0123456789ab-myrepo", false}, // container-ID era
+		{"gso-oldhost-repo", false},
+		{"gso-host-repo-linux", false},
+		{"myrunners-linux-x64", true}, // shape only; the gso- prefix is the caller's check
+	}
+	for _, tt := range tests {
+		if got := HasClassSuffix(tt.name); got != tt.want {
+			t.Errorf("HasClassSuffix(%q) = %v, want %v", tt.name, got, tt.want)
+		}
+	}
+}
