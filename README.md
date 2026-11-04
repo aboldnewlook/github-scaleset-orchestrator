@@ -332,7 +332,7 @@ gso worker --join 'gso-join:v1:...' --executor docker --slots 2 \
 
 The worker shows the router's address and short key and asks to confirm (skipped with `--yes`, or when there is no terminal, as in a container with `GSO_WORKER_JOIN` set). After enrollment the credential and the router's pinned key live in `--state-dir` (default `<config dir>/gso/worker`); the join string is no longer needed. Use `--credential-store keychain` on a desktop to keep the credential in the OS keychain.
 
-Settings can come from the environment: `GSO_WORKER_JOIN`, `GSO_WORKER_ROUTER`, `GSO_WORKER_NAME`, `GSO_WORKER_IMAGE`, `GSO_WORKER_DOCKER_HOST`, `GSO_WORKER_SLOTS`, `GSO_WORKER_ACCEPT_PUBLIC`. Flags win over the environment.
+Settings can come from the environment: `GSO_WORKER_JOIN`, `GSO_WORKER_JOIN_FILE` (wait for a file the router's `workers.bootstrap` writes; `--join` wins), `GSO_WORKER_ROUTER`, `GSO_WORKER_NAME`, `GSO_WORKER_IMAGE`, `GSO_WORKER_DOCKER_HOST`, `GSO_WORKER_SLOTS`, `GSO_WORKER_ACCEPT_PUBLIC`. Flags win over the environment.
 
 `--allow owner/*` limits which repositories the worker runs (default: the owners granted at enrollment). `--accept-public follow|accept|refuse` controls public repositories.
 

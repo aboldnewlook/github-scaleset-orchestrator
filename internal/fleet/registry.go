@@ -30,6 +30,9 @@ const (
 	maxBoundsSlots = 256
 )
 
+// EnrollmentTTL is how long an enrollment code stays redeemable.
+const EnrollmentTTL = enrollmentTTL
+
 var (
 	ErrInvalidCode     = errors.New("invalid or expired enrollment code")
 	ErrUnauthenticated = errors.New("invalid worker credential")
@@ -153,6 +156,30 @@ func OpenRegistry(path string) (*Registry, error) {
 		r.workers[w.ID] = &w
 	}
 	return r, nil
+}
+
+// PendingExpiry returns when the pending enrollment code for name expires. A
+// code that was replaced (another AddEnrollment for the name), redeemed or
+// pruned is gone, so a caller holding an earlier expiry can tell its own code
+// is no longer the live one.
+func (r *Registry) PendingExpiry(name string) (time.Time, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, p := range r.codes {
+		if p.name == name {
+			return p.expires, true
+		}
+	}
+	return time.Time{}, false
+}
+
+// ValidWorkerName reports whether name may be enrolled, with the same rule
+// AddEnrollment applies.
+func ValidWorkerName(name string) error {
+	if !workerNameRE.MatchString(name) || naming.WorkerSegment(name) == naming.LocalWorkerSegment {
+		return ErrBadName
+	}
+	return nil
 }
 
 // AddEnrollment creates a single-use code for name, valid for 15 minutes.

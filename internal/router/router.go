@@ -77,6 +77,18 @@ type Router struct {
 	tlsCfg   *tls.Config
 	pin      string
 
+	// Bootstrap enrollment (workers.bootstrap); see bootstrap.go.
+	bootstrapPoll    time.Duration // how often the loop checks the registry
+	bootstrapMargin  time.Duration // re-mint when the code has less than this left
+	bootstrapGiveUp  time.Duration // stop minting after this long without an enrollment
+	bootstrapBackoff time.Duration // wait this long after a failed write before trying again
+	bootstrapCancel  context.CancelFunc
+	// bootstrapBeforeMint, when set, runs just before the loop mints (tests).
+	bootstrapBeforeMint func()
+	stateDir            string
+	bootstrapDone       chan struct{} // closed when the loop ends; nil when bootstrap is off
+	bootstrap           *bootstrapPlan
+
 	mu        sync.Mutex
 	addr      string
 	ready     chan struct{}
@@ -131,6 +143,13 @@ func New(cfg *config.Config, logger *slog.Logger, bus *event.Bus, o Options) (*R
 		if err := r.openWorkerState(); err != nil {
 			return nil, err
 		}
+		plan, err := r.newBootstrapPlan()
+		if err != nil {
+			return nil, err
+		}
+		if plan != nil {
+			r.bootstrap, r.bootstrapDone = plan, make(chan struct{})
+		}
 	}
 	return r, nil
 }
@@ -164,6 +183,7 @@ func (r *Router) openWorkerState() error {
 		return fmt.Errorf("loading the worker listener key: %w", err)
 	}
 	r.registry, r.tlsCfg, r.pin = reg, tlsCfg, pin
+	r.stateDir = dir
 	return nil
 }
 
@@ -177,6 +197,7 @@ func (r *Router) Run(ctx context.Context) error {
 	if err := r.startWorkers(ctx); err != nil {
 		return err
 	}
+	defer r.stopBootstrap() // join the bootstrap loop before Run returns
 	return r.runOrchestrator(ctx)
 }
 
@@ -242,6 +263,9 @@ func (r *Router) startWorkers(ctx context.Context) error {
 			_ = httpSrv.Close()
 		}
 	}()
+	if r.bootstrap != nil {
+		r.startBootstrap(ctx)
+	}
 	return nil
 }
 

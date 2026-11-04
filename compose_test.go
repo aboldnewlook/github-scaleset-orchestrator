@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -110,7 +111,7 @@ func TestComposeWorkerShape(t *testing.T) {
 	// D5: two slots. The trailing --github-sim is empty in a normal deploy and
 	// carries the simulator's advertise URL in the sim profile: a docker-executor
 	// worker honours GSO_GITHUB_SIM only when it is given as a flag.
-	want := []string{"worker", "--router", "gso-router:9200", "--executor", "docker", "--slots", "2", "--github-sim", "${GSO_SIM_ADVERTISE:-}"}
+	want := []string{"worker", "--router", "gso-router:9200", "--executor", "docker", "--slots", "${GSO_WORKER_SLOTS:-2}", "--github-sim", "${GSO_SIM_ADVERTISE:-}"}
 	if got := v.GetStringSlice("services.gso-worker.command"); !slices.Equal(got, want) {
 		t.Fatalf("worker command = %q, want %q", got, want)
 	}
@@ -165,5 +166,70 @@ func TestComposeSimulatorListensOnOneAddressOnly(t *testing.T) {
 	j := slices.Index(cmd, "--advertise")
 	if j < 0 || j+1 >= len(cmd) || cmd[j+1] != "${GSO_SIM_ADVERTISE:-http://172.17.0.1:9300}" {
 		t.Fatalf("gso-sim command = %q, want --advertise ${GSO_SIM_ADVERTISE:-http://172.17.0.1:9300}", cmd)
+	}
+}
+
+// The bootstrap volume carries a live single-use enrollment code from the
+// router to the worker, so it is mounted in those two services and no other.
+func TestComposeBootstrapVolumeIsSharedByRouterAndWorkerOnly(t *testing.T) {
+	v := readCompose(t)
+	if _, ok := v.GetStringMap("volumes")["gso-bootstrap"]; !ok {
+		t.Fatal("named volume gso-bootstrap is missing")
+	}
+	// The router writes the file; the worker only reads it, so it mounts read-only.
+	for service, mount := range map[string]string{"gso-router": "gso-bootstrap:/bootstrap", "gso-worker": "gso-bootstrap:/bootstrap:ro"} {
+		if !slices.Contains(volumeEntries(v, service), any(mount)) {
+			t.Errorf("%s volumes = %v, want %s", service, volumeEntries(v, service), mount)
+		}
+	}
+	for name := range v.GetStringMap("services") {
+		if name == "gso-router" || name == "gso-worker" {
+			continue
+		}
+		if strings.Contains(fmt.Sprint(v.Get("services."+name+".volumes")), "gso-bootstrap") {
+			t.Errorf("%s mounts gso-bootstrap", name)
+		}
+	}
+}
+
+func TestComposeBootstrapEnrollsTheWorkerWithNoManualStep(t *testing.T) {
+	v := readCompose(t)
+	env := v.GetStringMapString("services.gso-router.environment")
+	want := map[string]string{
+		"gso_workers_bootstrap_name":      "unraid",
+		"gso_workers_bootstrap_classes":   "linux-x64",
+		"gso_workers_bootstrap_slots":     "${GSO_WORKER_SLOTS:-2}",
+		"gso_workers_bootstrap_join_file": "/bootstrap/join",
+	}
+	for k, w := range want {
+		if env[k] != w {
+			t.Errorf("router %s = %q, want %q", strings.ToUpper(k), env[k], w)
+		}
+	}
+	wenv := v.GetStringMapString("services.gso-worker.environment")
+	if got := wenv["gso_worker_join_file"]; got != "/bootstrap/join" {
+		t.Errorf("worker GSO_WORKER_JOIN_FILE = %q, want /bootstrap/join", got)
+	}
+	// GSO_WORKER_JOIN stays as an override (an explicit join string beats the file).
+	if got, ok := wenv["gso_worker_join"]; !ok || got != "${GSO_WORKER_JOIN:-}" {
+		t.Errorf("worker GSO_WORKER_JOIN = %q (set: %v), want ${GSO_WORKER_JOIN:-}", got, ok)
+	}
+	// The worker's slots follow the same variable as the bootstrap bounds.
+	cmd := v.GetStringSlice("services.gso-worker.command")
+	if i := slices.Index(cmd, "--slots"); i < 0 || i+1 >= len(cmd) || cmd[i+1] != "${GSO_WORKER_SLOTS:-2}" {
+		t.Errorf("worker command = %q, want --slots ${GSO_WORKER_SLOTS:-2}", cmd)
+	}
+}
+
+// The header comment must no longer ask for the manual three-step bootstrap.
+func TestComposeHeaderHasNoManualBootstrap(t *testing.T) {
+	b, err := os.ReadFile("docker-compose.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stale := range []string{"gso workers add", "Bootstrap, once", "redeploy"} {
+		if strings.Contains(string(b), stale) {
+			t.Errorf("docker-compose.yaml still mentions %q", stale)
+		}
 	}
 }

@@ -68,6 +68,11 @@ repos:
 #     - 172.16.0.0/12               # the compose network, when the worker is a sibling container
 #   max_slots_per_worker: 16        # hard cap on any worker's advertised slots
 #   default_class: linux-x64        # default: the router host's class
+#   bootstrap:                      # enroll one sibling worker with no human step (off unless name and join_file are set)
+#     name: unraid                  # GSO_WORKERS_BOOTSTRAP_NAME
+#     classes: [linux-x64]          # GSO_WORKERS_BOOTSTRAP_CLASSES (comma-separated in the env)
+#     slots: 2                      # GSO_WORKERS_BOOTSTRAP_SLOTS (default 1)
+#     join_file: /bootstrap/join    # GSO_WORKERS_BOOTSTRAP_JOIN_FILE; the worker reads it with --join-file
 
 # Control server settings for remote TCP access.
 # TCP is always TLS-encrypted. Requires GSO_CONTROL_TOKEN env var.
