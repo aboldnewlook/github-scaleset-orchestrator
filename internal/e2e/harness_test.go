@@ -388,6 +388,13 @@ type routerProc struct {
 // optionally public:. The two are concatenated, never re-marshalled.
 func startRouter(t *testing.T, sim *simProc, cfgYAML string) *routerProc {
 	t.Helper()
+	return startRouterEnv(t, sim, cfgYAML, nil)
+}
+
+// startRouterEnv is startRouter with extra KEY=value entries in the router's
+// environment (e.g. GSO_WORKERS_BOOTSTRAP_*).
+func startRouterEnv(t *testing.T, sim *simProc, cfgYAML string, extraEnv []string) *routerProc {
+	t.Helper()
 	dir := shortDir(t, "gr")
 	addr := fmt.Sprintf("127.0.0.1:%d", freePort(t))
 	harness := fmt.Sprintf("auth:\n  env: GSO_E2E_UNUSED_TOKEN\nmax_runners: 0\ngithub_sim: %s\nrunner:\n  instance_id: e2e\nworkers:\n  listen: %q\n  advertise: %q\n  default_class: %s\n",
@@ -397,7 +404,7 @@ func startRouter(t *testing.T, sim *simProc, cfgYAML string) *routerProc {
 		t.Fatal(err)
 	}
 	r := &routerProc{dir: dir, Socket: socketFor(dir), WorkersAddr: addr, sim: sim}
-	r.proc = newProc(t, "router", isolatedEnv(t, dir), "start", "--config", cfgPath)
+	r.proc = newProc(t, "router", append(isolatedEnv(t, dir), extraEnv...), "start", "--config", cfgPath)
 	r.waitReady(t)
 	return r
 }

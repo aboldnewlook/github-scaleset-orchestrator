@@ -195,3 +195,69 @@ func TestLoadGitHubSim(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadWorkersBootstrapFromFile(t *testing.T) {
+	cfg, err := Load(writeWorkersConfig(t, `max_runners: 0
+workers:
+  listen: ":9200"
+  advertise: "unraid.lan:9200"
+  bootstrap:
+    name: unraid
+    classes: [linux-x64, linux-arm64]
+    slots: 3
+    join_file: /bootstrap/join
+`))
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	b := cfg.Workers.Bootstrap
+	if b.Name != "unraid" || b.Slots != 3 || b.JoinFile != "/bootstrap/join" || strings.Join(b.Classes, ",") != "linux-x64,linux-arm64" {
+		t.Fatalf("bootstrap = %+v", b)
+	}
+	if !b.Enabled() {
+		t.Fatal("Enabled() = false with name and join_file set")
+	}
+}
+
+func TestLoadWorkersBootstrapFromEnv(t *testing.T) {
+	t.Setenv("GSO_MAX_RUNNERS", "0")
+	t.Setenv("GSO_WORKERS_LISTEN", ":9300")
+	t.Setenv("GSO_WORKERS_ADVERTISE", "10.0.0.5:9300")
+	t.Setenv("GSO_WORKERS_BOOTSTRAP_NAME", "unraid")
+	t.Setenv("GSO_WORKERS_BOOTSTRAP_CLASSES", "linux-x64, linux-arm64")
+	t.Setenv("GSO_WORKERS_BOOTSTRAP_SLOTS", "2")
+	t.Setenv("GSO_WORKERS_BOOTSTRAP_JOIN_FILE", "/bootstrap/join")
+	cfg, err := Load(writeWorkersConfig(t, ""))
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	b := cfg.Workers.Bootstrap
+	if b.Name != "unraid" || b.Slots != 2 || b.JoinFile != "/bootstrap/join" || strings.Join(b.Classes, ",") != "linux-x64,linux-arm64" {
+		t.Fatalf("bootstrap from env = %+v", b)
+	}
+}
+
+func TestLoadWorkersBootstrapIsOffUnlessNameAndJoinFileAreSet(t *testing.T) {
+	for name, body := range map[string]string{
+		"unset":     "",
+		"name only": "    name: unraid\n",
+		"file only": "    join_file: /bootstrap/join\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg, err := Load(writeWorkersConfig(t, "max_runners: 1\nworkers:\n  bootstrap:\n    slots: 1\n"+body))
+			if err != nil {
+				t.Fatalf("Load() error: %v", err)
+			}
+			if cfg.Workers.Bootstrap.Enabled() {
+				t.Fatalf("Enabled() = true for %+v", cfg.Workers.Bootstrap)
+			}
+		})
+	}
+}
+
+func TestLoadWorkersBootstrapNeedsTheWorkerListener(t *testing.T) {
+	_, err := Load(writeWorkersConfig(t, "max_runners: 1\nworkers:\n  bootstrap:\n    name: unraid\n    join_file: /bootstrap/join\n    classes: [linux-x64]\n"))
+	if err == nil || !strings.Contains(err.Error(), "workers.bootstrap requires workers.listen") {
+		t.Fatalf("Load() error = %v, want it to require workers.listen", err)
+	}
+}

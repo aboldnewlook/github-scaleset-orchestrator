@@ -28,7 +28,7 @@ import (
 
 // workerFlags holds the raw `gso worker` flag values.
 type workerFlags struct {
-	join, router, name, stateDir, executor, image, dockerHost, acceptPublic, credentialStore, githubSim string
+	join, joinFile, router, name, stateDir, executor, image, dockerHost, acceptPublic, credentialStore, githubSim string
 
 	slots        int
 	memoryMB     int64
@@ -41,6 +41,9 @@ type workerFlags struct {
 // workerSettings is the resolved configuration of `gso worker`.
 type workerSettings struct {
 	Join            string
+	JoinFile        string        // file the router's bootstrap writes the join string to
+	JoinPoll        time.Duration // how often to look for JoinFile
+	JoinLogEvery    time.Duration // how often to say the worker is still waiting
 	Router          string
 	Name            string
 	StateDir        string
@@ -69,7 +72,9 @@ var (
 		Long: `Runs jobs for a gso router on this machine.
 
 The first start needs the join string printed by "gso workers add <name>" on
-the router (--join or GSO_WORKER_JOIN). After that the credential and the
+the router (--join or GSO_WORKER_JOIN), or --join-file (GSO_WORKER_JOIN_FILE)
+naming a file the router's workers.bootstrap writes; the worker then waits for
+that file. After that the credential and the
 router's pinned key are read from --state-dir.
 
 Stopping the worker (Ctrl-C, SIGTERM, a container stop) closes its session
@@ -83,6 +88,7 @@ func init() {
 	rootCmd.AddCommand(workerCmd)
 	f := workerCmd.Flags()
 	f.StringVar(&wf.join, "join", "", "join string from `gso workers add` (env GSO_WORKER_JOIN); used only until this worker is enrolled")
+	f.StringVar(&wf.joinFile, "join-file", "", "file to read the join string from, waiting for it to appear (env GSO_WORKER_JOIN_FILE); written by the router's workers.bootstrap in a shared compose stack. --join wins; ignored once enrolled")
 	f.StringVar(&wf.router, "router", "", "dial the router at host:port instead of the join string's address (env GSO_WORKER_ROUTER); the pinned key still applies")
 	f.StringVar(&wf.name, "name", "", "worker name (env GSO_WORKER_NAME; default: this host's name)")
 	f.StringVar(&wf.stateDir, "state-dir", "", "directory for the credential, enrollment state and runner records (default: <config dir>/gso/worker)")
@@ -116,6 +122,9 @@ func resolveWorkerSettings(f workerFlags, changed func(string) bool, getenv func
 	backoffMin, backoffMax := workerBackoff()
 	s := workerSettings{
 		Join:            str("join", "GSO_WORKER_JOIN", f.join),
+		JoinFile:        str("join-file", "GSO_WORKER_JOIN_FILE", f.joinFile),
+		JoinPoll:        joinFilePoll,
+		JoinLogEvery:    joinFileLogEvery,
 		Router:          str("router", "GSO_WORKER_ROUTER", f.router),
 		Name:            str("name", "GSO_WORKER_NAME", f.name),
 		StateDir:        strings.TrimSpace(f.stateDir),
@@ -332,12 +341,20 @@ func ensureEnrolled(ctx context.Context, s workerSettings, store worker.Credenti
 	if stateErr != nil && !errors.Is(stateErr, os.ErrNotExist) {
 		return worker.State{}, fmt.Errorf("reading %s: %w", statePath, stateErr)
 	}
-	if s.Join == "" {
-		return worker.State{}, errors.New("this worker is not enrolled: pass --join (or set GSO_WORKER_JOIN) to the string printed by `gso workers add` on the router")
+	joinFlag, joinString := "--join", s.Join
+	if joinString == "" && s.JoinFile != "" {
+		var err error
+		if joinString, err = waitForJoinFile(ctx, s, out); err != nil {
+			return worker.State{}, err
+		}
+		joinFlag = "--join-file"
 	}
-	j, err := worker.ParseJoin(s.Join)
+	if joinString == "" {
+		return worker.State{}, errors.New("this worker is not enrolled: pass --join (or set GSO_WORKER_JOIN) to the string printed by `gso workers add` on the router, or --join-file (GSO_WORKER_JOIN_FILE) to the file the router's workers.bootstrap writes")
+	}
+	j, err := worker.ParseJoin(joinString)
 	if err != nil {
-		return worker.State{}, fmt.Errorf("--join: %w", err)
+		return worker.State{}, fmt.Errorf("%s: %w", joinFlag, err)
 	}
 	_, _ = fmt.Fprintf(out, "Enrolling %q with the gso router at %s\nRouter key: %s\nCheck both against the output of `gso workers add` before continuing.\n", s.Name, j.Addr, worker.ShortPin(j.Pin))
 	if interactive && !s.Yes {
@@ -359,6 +376,45 @@ func ensureEnrolled(ctx context.Context, s workerSettings, store worker.Credenti
 	}
 	_, _ = fmt.Fprintf(out, "Enrolled. Credential stored (%s); state in %s\n", s.CredentialStore, s.StateDir)
 	return st, nil
+}
+
+// How often the worker looks for the join file and says it is still waiting.
+const (
+	joinFilePoll     = 3 * time.Second
+	joinFileLogEvery = time.Minute
+)
+
+// waitForJoinFile blocks until s.JoinFile exists and has content, then returns
+// that content (the join string, a secret: never printed). It returns early
+// with ctx's error. A read error other than "not there yet" is returned.
+func waitForJoinFile(ctx context.Context, s workerSettings, out io.Writer) (string, error) {
+	announce := func() {
+		_, _ = fmt.Fprintf(out, "Waiting for the router to write a join string to %s\n", s.JoinFile)
+	}
+	announce()
+	poll := time.NewTicker(s.JoinPoll)
+	defer poll.Stop()
+	lastLog := time.Now()
+	for {
+		b, err := os.ReadFile(s.JoinFile)
+		switch {
+		case err == nil:
+			if v := strings.TrimSpace(string(b)); v != "" {
+				return v, nil
+			}
+		case !errors.Is(err, os.ErrNotExist):
+			return "", fmt.Errorf("reading --join-file: %w", err)
+		}
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-poll.C:
+		}
+		if time.Since(lastLog) >= s.JoinLogEvery {
+			announce()
+			lastLog = time.Now()
+		}
+	}
 }
 
 // loadOrCreateMachineID returns a random ID that identifies this installation

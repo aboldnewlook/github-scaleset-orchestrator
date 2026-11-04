@@ -73,6 +73,12 @@ type Router struct {
 	tlsCfg   *tls.Config
 	pin      string
 
+	// Bootstrap enrollment (workers.bootstrap); see bootstrap.go.
+	bootstrapPoll   time.Duration // how often the loop checks the registry
+	bootstrapMargin time.Duration // re-mint when the code has less than this left
+	bootstrapDone   chan struct{} // closed when the loop ends; nil when bootstrap is off
+	bootstrap       *bootstrapPlan
+
 	mu        sync.Mutex
 	addr      string
 	ready     chan struct{}
@@ -123,6 +129,13 @@ func New(cfg *config.Config, logger *slog.Logger, bus *event.Bus, o Options) (*R
 	if cfg.WorkersEnabled() {
 		if err := r.openWorkerState(); err != nil {
 			return nil, err
+		}
+		plan, err := r.newBootstrapPlan()
+		if err != nil {
+			return nil, err
+		}
+		if plan != nil {
+			r.bootstrap, r.bootstrapDone = plan, make(chan struct{})
 		}
 	}
 	return r, nil
@@ -235,6 +248,9 @@ func (r *Router) startWorkers(ctx context.Context) error {
 			_ = httpSrv.Close()
 		}
 	}()
+	if r.bootstrap != nil {
+		go r.runBootstrap(ctx, r.bootstrap)
+	}
 	return nil
 }
 

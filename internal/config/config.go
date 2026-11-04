@@ -59,12 +59,27 @@ type RunnerConfig struct {
 // WorkersConfig enables remote workers (design spec §4.2, §9.1). Everything
 // here is off unless Listen is set.
 type WorkersConfig struct {
-	Listen            string   `yaml:"listen"               mapstructure:"listen"`
-	Advertise         string   `yaml:"advertise"            mapstructure:"advertise"`
-	AllowCIDRs        []string `yaml:"allow_cidrs"          mapstructure:"allow_cidrs"`
-	MaxSlotsPerWorker int      `yaml:"max_slots_per_worker" mapstructure:"max_slots_per_worker"`
-	DefaultClass      string   `yaml:"default_class"        mapstructure:"default_class"`
+	Listen            string          `yaml:"listen"               mapstructure:"listen"`
+	Advertise         string          `yaml:"advertise"            mapstructure:"advertise"`
+	AllowCIDRs        []string        `yaml:"allow_cidrs"          mapstructure:"allow_cidrs"`
+	MaxSlotsPerWorker int             `yaml:"max_slots_per_worker" mapstructure:"max_slots_per_worker"`
+	DefaultClass      string          `yaml:"default_class"        mapstructure:"default_class"`
+	Bootstrap         BootstrapConfig `yaml:"bootstrap"     mapstructure:"bootstrap"`
 }
+
+// BootstrapConfig lets the router enroll one sibling worker (typically a
+// docker worker in the same compose stack) with no human step: it mints an
+// enrollment and writes the join string to JoinFile on a volume the worker
+// also mounts. It is off unless Name and JoinFile are both set.
+type BootstrapConfig struct {
+	Name     string   `yaml:"name"      mapstructure:"name"`
+	Classes  []string `yaml:"classes"   mapstructure:"classes"`
+	Slots    int      `yaml:"slots"     mapstructure:"slots"`
+	JoinFile string   `yaml:"join_file" mapstructure:"join_file"`
+}
+
+// Enabled reports whether bootstrap enrollment is configured.
+func (b BootstrapConfig) Enabled() bool { return b.Name != "" && b.JoinFile != "" }
 
 type Config struct {
 	Auth       TokenSource   `yaml:"auth"        mapstructure:"auth"`
@@ -93,6 +108,7 @@ func Load(path string) (*Config, error) {
 	v.SetDefault("runner.cache_uid", 1001)
 	v.SetDefault("runner.cache_gid", 1001)
 	v.SetDefault("workers.max_slots_per_worker", 16)
+	v.SetDefault("workers.bootstrap.slots", 1)
 
 	// Config file
 	v.SetConfigType("yaml")
@@ -136,6 +152,9 @@ func Load(path string) (*Config, error) {
 	_ = v.BindEnv("workers.advertise", "GSO_WORKERS_ADVERTISE")
 	_ = v.BindEnv("workers.max_slots_per_worker", "GSO_WORKERS_MAX_SLOTS_PER_WORKER")
 	_ = v.BindEnv("workers.default_class", "GSO_WORKERS_DEFAULT_CLASS")
+	_ = v.BindEnv("workers.bootstrap.name", "GSO_WORKERS_BOOTSTRAP_NAME")
+	_ = v.BindEnv("workers.bootstrap.slots", "GSO_WORKERS_BOOTSTRAP_SLOTS")
+	_ = v.BindEnv("workers.bootstrap.join_file", "GSO_WORKERS_BOOTSTRAP_JOIN_FILE")
 	_ = v.BindEnv("github_sim", "GSO_GITHUB_SIM")
 
 	// Parse GSO_REPOS before Viper unmarshal -- Viper can't map an env
@@ -184,6 +203,15 @@ func Load(path string) (*Config, error) {
 			cidrs[i] = strings.TrimSpace(c)
 		}
 		cfg.Workers.AllowCIDRs = cidrs
+	}
+
+	// Handle GSO_WORKERS_BOOTSTRAP_CLASSES as comma-separated when set via env
+	if classesEnv := os.Getenv("GSO_WORKERS_BOOTSTRAP_CLASSES"); classesEnv != "" {
+		classes := strings.Split(classesEnv, ",")
+		for i, c := range classes {
+			classes[i] = strings.TrimSpace(c)
+		}
+		cfg.Workers.Bootstrap.Classes = classes
 	}
 
 	// If no config file and no repos from env, report the missing file
@@ -319,6 +347,9 @@ func StateDir() (string, error) {
 }
 
 func (w WorkersConfig) validate() error {
+	if w.Bootstrap.Enabled() && w.Listen == "" {
+		return fmt.Errorf("workers.bootstrap requires workers.listen (GSO_WORKERS_LISTEN)")
+	}
 	if w.Listen != "" {
 		if _, port, err := net.SplitHostPort(w.Listen); err != nil || !validPort(port) {
 			return fmt.Errorf("workers.listen must be [host]:port, got %q", w.Listen)

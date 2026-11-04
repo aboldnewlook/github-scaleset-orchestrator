@@ -11,7 +11,8 @@
 #   GSO_WORKERS_ADVERTISE   host:port that workers dial, e.g. unraid.lan:9200
 #   GSO_WORKERS_ALLOW_CIDRS optional; default = your LAN + the compose network
 #   GSO_INSTANCE_ID         optional; stable scale-set instance name (default unraid)
-#   GSO_WORKER_JOIN         join string from `gso workers add` (first start only)
+#   GSO_WORKER_SLOTS        optional; concurrent jobs on the worker (default 2)
+#   GSO_WORKER_JOIN         optional; a join string, only to override the bootstrap file
 #
 # Simulator dry run (all three, plus the profile; see docs/unraid-portainer.md):
 #   COMPOSE_PROFILES=sim
@@ -21,11 +22,12 @@
 # All three name the same address (the Docker bridge gateway). Clear
 # GSO_GITHUB_SIM and GSO_SIM_ADVERTISE after the dry run.
 #
-# Bootstrap, once:
-#   1. Deploy with GSO_WORKER_JOIN empty. The router starts; the worker exits
-#      with "not enrolled" and restarts until step 3.
-#   2. docker exec gso-router gso workers add unraid --classes linux-x64 --slots 2
-#   3. Put the printed join string in GSO_WORKER_JOIN and redeploy.
+# First deploy needs no extra step: the router enrolls the worker itself. It
+# writes a single-use join string to the gso-bootstrap volume (/bootstrap/join),
+# the worker waits for that file, enrolls, and the router deletes the file.
+# Whoever can mount that volume can enroll as "unraid" (the same trust as access
+# to the Docker host), which is why only these two services mount it.
+# GSO_WORKER_JOIN, if set, overrides the file (see docs/unraid-portainer.md).
 services:
   gso-router:
     image: ghcr.io/aboldnewlook/github-scaleset-orchestrator:${GSO_TAG:?set GSO_TAG to a gso release tag}
@@ -42,6 +44,12 @@ services:
       # Narrow this to your LAN /24 plus the compose network (Docker uses 172.16.0.0/12).
       # The default matches gso's own: RFC1918, CGNAT, loopback.
       GSO_WORKERS_ALLOW_CIDRS: ${GSO_WORKERS_ALLOW_CIDRS:-10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,100.64.0.0/10,127.0.0.0/8}
+      # Enroll the sibling worker below with no manual step: the router mints
+      # the enrollment and writes the join string to the shared volume.
+      GSO_WORKERS_BOOTSTRAP_NAME: unraid
+      GSO_WORKERS_BOOTSTRAP_CLASSES: linux-x64
+      GSO_WORKERS_BOOTSTRAP_SLOTS: ${GSO_WORKER_SLOTS:-2}
+      GSO_WORKERS_BOOTSTRAP_JOIN_FILE: /bootstrap/join
       # Empty (ignored) unless you run the `sim` profile.
       GSO_GITHUB_SIM: ${GSO_GITHUB_SIM:-}
     volumes:
@@ -55,6 +63,7 @@ services:
         bind:
           create_host_path: false
       - gso-router-state:/home/runner/.config/gso   # TLS key, workers.json
+      - gso-bootstrap:/bootstrap                    # join string for the worker; shared with gso-worker only
     ports:
       - "9200:9200"
     restart: unless-stopped
@@ -67,18 +76,20 @@ services:
     # The trailing --github-sim is empty in a normal deploy. In the sim profile
     # it names the simulator so the worker trusts its job configs; a docker
     # worker ignores GSO_GITHUB_SIM in the environment on purpose.
-    command: ["worker", "--router", "gso-router:9200", "--executor", "docker", "--slots", "2", "--github-sim", "${GSO_SIM_ADVERTISE:-}"]
+    command: ["worker", "--router", "gso-router:9200", "--executor", "docker", "--slots", "${GSO_WORKER_SLOTS:-2}", "--github-sim", "${GSO_SIM_ADVERTISE:-}"]
     # The worker starts job containers through the host Docker socket, which
     # is root:root (or root:docker) on Unraid. Root inside this container is
     # the same trust level as the socket itself. Jobs still run as the image's
     # non-root `runner` user in their own sibling containers.
     user: "0:0"
     environment:
-      GSO_WORKER_JOIN: ${GSO_WORKER_JOIN:-}     # ignored once enrolled
+      GSO_WORKER_JOIN_FILE: /bootstrap/join     # written by the router; ignored once enrolled
+      GSO_WORKER_JOIN: ${GSO_WORKER_JOIN:-}     # optional override; wins over the file, ignored once enrolled
       GSO_WORKER_IMAGE: ghcr.io/aboldnewlook/github-scaleset-orchestrator:${GSO_TAG:?set GSO_TAG to a gso release tag}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - gso-worker-state:/home/runner/.config/gso   # credential, pin, runners.json
+      - gso-bootstrap:/bootstrap:ro                 # join string written by the router
     depends_on:
       - gso-router
     restart: unless-stopped
@@ -103,3 +114,4 @@ services:
 volumes:
   gso-router-state: {}
   gso-worker-state: {}
+  gso-bootstrap: {}   # holds a live single-use join string until the worker enrolls

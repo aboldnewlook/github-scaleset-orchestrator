@@ -75,10 +75,12 @@ RUN mkdir -p /etc/gso \
     && mkdir -p /cache \
     && mkdir -p /home/runner/.cache \
     && mkdir -p /home/runner/.config/gso/tls \
+    && mkdir -p /bootstrap \
     && chown -R runner:runner /home/runner \
     && chown -R runner:runner /opt/gso \
     && chown -R runner:runner /cache \
-    && chown -R runner:runner /etc/gso
+    && chown -R runner:runner /etc/gso \
+    && chown runner:runner /bootstrap
 
 # Copy the Go binary from builder
 COPY --from=builder /out/gso /usr/local/bin/gso

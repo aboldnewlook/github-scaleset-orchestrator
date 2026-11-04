@@ -30,6 +30,9 @@ const (
 	maxBoundsSlots = 256
 )
 
+// EnrollmentTTL is how long an enrollment code stays redeemable.
+const EnrollmentTTL = enrollmentTTL
+
 var (
 	ErrInvalidCode     = errors.New("invalid or expired enrollment code")
 	ErrUnauthenticated = errors.New("invalid worker credential")
@@ -153,6 +156,15 @@ func OpenRegistry(path string) (*Registry, error) {
 		r.workers[w.ID] = &w
 	}
 	return r, nil
+}
+
+// ValidWorkerName reports whether name may be enrolled, with the same rule
+// AddEnrollment applies.
+func ValidWorkerName(name string) error {
+	if !workerNameRE.MatchString(name) || naming.WorkerSegment(name) == naming.LocalWorkerSegment {
+		return ErrBadName
+	}
+	return nil
 }
 
 // AddEnrollment creates a single-use code for name, valid for 15 minutes.

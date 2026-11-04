@@ -3,6 +3,8 @@
 package e2e
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -298,4 +300,35 @@ func TestRouterRestartWhileGitHubIsDownDefersAdoption(t *testing.T) {
 	}
 	waitIdle(t, r, w, "alpha")
 	waitJob(t, sim, injectJob(t, sim, "--repo", "o/a", "--duration", "500ms"), ghsim.JobCompleted, 30*time.Second)
+}
+
+// A sibling worker started with --join-file and no join string enrolls with no
+// human step: the router (workers.bootstrap) writes the join string, the worker
+// waits for it, and the router removes the file once the worker is enrolled.
+func TestBootstrapSiblingEnrollsWithNoHumanStep(t *testing.T) {
+	t.Parallel()
+	sim := startSim(t)
+	joinFile := filepath.Join(shortDir(t, "gb"), "bootstrap", "join")
+	r := startRouterEnv(t, sim, defaultRepos, []string{
+		"GSO_WORKERS_BOOTSTRAP_NAME=sibling",
+		"GSO_WORKERS_BOOTSTRAP_CLASSES=" + simClass(),
+		"GSO_WORKERS_BOOTSTRAP_SLOTS=1",
+		"GSO_WORKERS_BOOTSTRAP_JOIN_FILE=" + joinFile,
+	})
+	// The worker may start before or after the router writes the file.
+	w := startWorker(t, r, "sibling", "", "--join-file", joinFile)
+	waitWorkerConnected(t, r, "sibling")
+	waitFor(t, 20*time.Second, "the router to remove the join file", func() bool {
+		_, err := os.Stat(joinFile)
+		return os.IsNotExist(err)
+	})
+
+	id := injectJob(t, sim, "--repo", "o/a", "--duration", "1s")
+	job := waitJob(t, sim, id, ghsim.JobCompleted, 30*time.Second)
+	if seg := segmentOf(job.Runner); seg != "sibling" {
+		t.Fatalf("the job ran on %q, want one of sibling's runners", job.Runner)
+	}
+	if strings.Contains(r.log(), worker.JoinPrefix) || strings.Contains(w.log(), worker.JoinPrefix) {
+		t.Fatal("a log holds a join string")
+	}
 }
