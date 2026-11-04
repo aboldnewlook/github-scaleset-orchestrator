@@ -77,6 +77,10 @@ type Config struct {
 	// GitHubSim is the base URL of a simulated GitHub. When set, repos need
 	// no token source: the simulator accepts none.
 	GitHubSim string `yaml:"github_sim" mapstructure:"github_sim"`
+	// CleanupStaleScaleSets lets the router delete orphaned pre-instance-era
+	// scale sets (gso-<hostname>-<repo>) once it can prove they are unused.
+	// Default true when loaded; false keeps only the warning and alert.
+	CleanupStaleScaleSets bool `yaml:"cleanup_stale_scale_sets" mapstructure:"cleanup_stale_scale_sets"`
 }
 
 // Load reads configuration from the given file path, overlaid with environment
@@ -93,6 +97,7 @@ func Load(path string) (*Config, error) {
 	v.SetDefault("runner.cache_uid", 1001)
 	v.SetDefault("runner.cache_gid", 1001)
 	v.SetDefault("workers.max_slots_per_worker", 16)
+	v.SetDefault("cleanup_stale_scale_sets", true)
 
 	// Config file
 	v.SetConfigType("yaml")
@@ -137,6 +142,7 @@ func Load(path string) (*Config, error) {
 	_ = v.BindEnv("workers.max_slots_per_worker", "GSO_WORKERS_MAX_SLOTS_PER_WORKER")
 	_ = v.BindEnv("workers.default_class", "GSO_WORKERS_DEFAULT_CLASS")
 	_ = v.BindEnv("github_sim", "GSO_GITHUB_SIM")
+	_ = v.BindEnv("cleanup_stale_scale_sets", "GSO_CLEANUP_STALE_SCALE_SETS")
 
 	// Parse GSO_REPOS before Viper unmarshal -- Viper can't map an env
 	// string into a slice-of-structs, so we handle it ourselves.

@@ -158,6 +158,7 @@ type scaleSetState struct {
 	queue    []*scaleset.RunnerScaleSetMessage
 	nextMsg  int
 	override *scaleset.RunnerScaleSetStatistic
+	noStats  bool // report no statistics at all (HideStatistics)
 }
 
 type sessionState struct {
@@ -306,6 +307,14 @@ func (m *Model) SetStats(repo, scaleSetName string, st scaleset.RunnerScaleSetSt
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.controlTargetLocked(repo, scaleSetName).override = &st
+}
+
+// HideStatistics makes the named set report no statistics, in listings and in
+// its session, as GitHub can.
+func (m *Model) HideStatistics(repo, scaleSetName string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.controlTargetLocked(repo, scaleSetName).noStats = true
 }
 
 // FailSessions makes the next n OpenSession calls on the named set return err.

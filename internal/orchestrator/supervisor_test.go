@@ -439,7 +439,8 @@ func TestDefaultSupervisorTiming(t *testing.T) {
 	if _, set := os.LookupEnv("GSO_TIMING_SCALE"); set {
 		t.Skip("GSO_TIMING_SCALE is set for this run")
 	}
-	want := SupervisorTiming{BackoffMin: time.Second, BackoffMax: 5 * time.Minute, ConflictWait: 30 * time.Second, ConflictRetries: 10, DegradeAfter: 3}
+	want := SupervisorTiming{BackoffMin: time.Second, BackoffMax: 5 * time.Minute, ConflictWait: 30 * time.Second, ConflictRetries: 10, DegradeAfter: 3,
+		CleanupBackoff: time.Minute, CleanupRetries: 5} // 1+2+4+8+16 min: stale-set retries stop after ~31 min
 	if got := DefaultSupervisorTiming(); got != want {
 		t.Fatalf("DefaultSupervisorTiming() = %+v, want %+v", got, want)
 	}

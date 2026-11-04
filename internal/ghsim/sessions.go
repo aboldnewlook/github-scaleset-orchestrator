@@ -27,8 +27,11 @@ func waitChange(ctx context.Context, ch <-chan struct{}, d time.Duration) error 
 func (m *Model) publicSetLocked(ss *scaleSetState) scaleset.RunnerScaleSet {
 	out := ss.set
 	out.Labels = append([]scaleset.Label(nil), ss.set.Labels...)
-	st := m.statsLocked(ss)
-	out.Statistics = &st
+	out.Statistics = nil
+	if !ss.noStats {
+		st := m.statsLocked(ss)
+		out.Statistics = &st
+	}
 	return out
 }
 
@@ -151,9 +154,13 @@ func (m *Model) openSession(repo string, scaleSetID int, owner string) (scaleset
 	ss.session = s
 	m.sessions[s.id] = scaleSetID
 	set := m.publicSetLocked(ss)
-	stats := m.statsLocked(ss)
+	var stats *scaleset.RunnerScaleSetStatistic
+	if !ss.noStats {
+		st := m.statsLocked(ss)
+		stats = &st
+	}
 	m.notifyLocked()
-	return scaleset.RunnerScaleSetSession{SessionID: s.id, OwnerName: owner, RunnerScaleSet: &set, Statistics: &stats}, nil
+	return scaleset.RunnerScaleSetSession{SessionID: s.id, OwnerName: owner, RunnerScaleSet: &set, Statistics: stats}, nil
 }
 
 // sessionLocked resolves an open, unexpired session of repo.

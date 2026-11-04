@@ -10,6 +10,10 @@ auth:
 # Maximum concurrent runner processes (default: number of CPUs)
 max_runners: 4
 
+# Delete orphaned pre-instance-era scale sets (gso-<hostname>-<repo>) at router
+# startup, only when idle and unowned (docs/migrations.md). Default true.
+# cleanup_stale_scale_sets: false   # env: GSO_CLEANUP_STALE_SCALE_SETS
+
 # Optional isolation for each ephemeral job. The default is subprocess mode.
 # Docker mode requires the manager to have Docker socket access. The job image
 # must include /usr/local/bin/gso-job and /opt/gso-runner (the stock image does).
