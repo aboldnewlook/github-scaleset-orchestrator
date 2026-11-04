@@ -58,6 +58,17 @@ type Client interface {
 // Factory creates the Client for one configured repo.
 type Factory func(ctx context.Context, repo config.Repo) (Client, error)
 
+// ScaleSetDeleter is the one destructive scale-set call. It is deliberately
+// not part of Client: the listener and scalers can never delete a scale set,
+// not even on a 409. Only the router's startup cleanup of orphaned
+// pre-instance-era sets (and the CLI's reset) hold one.
+type ScaleSetDeleter interface {
+	DeleteRunnerScaleSet(ctx context.Context, id int) error
+}
+
+// DeleterFactory creates the ScaleSetDeleter for one configured repo.
+type DeleterFactory func(ctx context.Context, repo config.Repo) (ScaleSetDeleter, error)
+
 // client adapts *scaleset.Client to Client and adds the REST calls.
 type client struct {
 	*scaleset.Client
@@ -95,29 +106,55 @@ func NewFactory(cfg *config.Config, httpClient *http.Client, logger *slog.Logger
 		httpClient = NewHTTPClient()
 	}
 	return func(_ context.Context, repo config.Repo) (Client, error) {
-		owner, name, ok := strings.Cut(repo.Name, "/")
-		if !ok || owner == "" || name == "" || strings.Contains(name, "/") {
-			return nil, fmt.Errorf("repo %q: want owner/name", repo.Name)
-		}
-		token, err := cfg.TokenForRepo(repo)
+		sc, token, err := newScaleSetClient(cfg, httpClient, logger, repo)
 		if err != nil {
-			return nil, fmt.Errorf("resolving token for %s: %w", repo.Name, err)
-		}
-		sc, err := scaleset.NewClientWithPersonalAccessToken(
-			scaleset.NewClientWithPersonalAccessTokenConfig{
-				GitHubConfigURL:     "https://github.com/" + repo.Name,
-				PersonalAccessToken: token,
-				SystemInfo:          scaleset.SystemInfo{System: "gso", Version: buildinfo.Version, Subsystem: "client"},
-			},
-			scaleset.WithHTTPClient(httpClient),
-			scaleset.WithLogger(logger.With("repo", repo.Name)),
-		)
-		if err != nil {
-			return nil, fmt.Errorf("creating scaleset client for %s: %w", repo.Name, err)
+			return nil, err
 		}
 		return &client{
 			Client: sc,
 			rest:   &restClient{base: defaultAPIBase, repo: repo.Name, token: token, http: httpClient},
 		}, nil
 	}
+}
+
+// NewDeleterFactory returns a DeleterFactory for real GitHub, with the same
+// per-repo token and HTTP client as NewFactory. nil httpClient means
+// NewHTTPClient().
+func NewDeleterFactory(cfg *config.Config, httpClient *http.Client, logger *slog.Logger) DeleterFactory {
+	if httpClient == nil {
+		httpClient = NewHTTPClient()
+	}
+	return func(_ context.Context, repo config.Repo) (ScaleSetDeleter, error) {
+		sc, _, err := newScaleSetClient(cfg, httpClient, logger, repo)
+		if err != nil {
+			return nil, err
+		}
+		return sc, nil
+	}
+}
+
+// newScaleSetClient builds the SDK client for one repo and returns the token
+// it authenticates with.
+func newScaleSetClient(cfg *config.Config, httpClient *http.Client, logger *slog.Logger, repo config.Repo) (*scaleset.Client, string, error) {
+	owner, name, ok := strings.Cut(repo.Name, "/")
+	if !ok || owner == "" || name == "" || strings.Contains(name, "/") {
+		return nil, "", fmt.Errorf("repo %q: want owner/name", repo.Name)
+	}
+	token, err := cfg.TokenForRepo(repo)
+	if err != nil {
+		return nil, "", fmt.Errorf("resolving token for %s: %w", repo.Name, err)
+	}
+	sc, err := scaleset.NewClientWithPersonalAccessToken(
+		scaleset.NewClientWithPersonalAccessTokenConfig{
+			GitHubConfigURL:     "https://github.com/" + repo.Name,
+			PersonalAccessToken: token,
+			SystemInfo:          scaleset.SystemInfo{System: "gso", Version: buildinfo.Version, Subsystem: "client"},
+		},
+		scaleset.WithHTTPClient(httpClient),
+		scaleset.WithLogger(logger.With("repo", repo.Name)),
+	)
+	if err != nil {
+		return nil, "", fmt.Errorf("creating scaleset client for %s: %w", repo.Name, err)
+	}
+	return sc, token, nil
 }

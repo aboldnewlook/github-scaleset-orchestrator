@@ -261,3 +261,34 @@ func TestLoadWorkersBootstrapNeedsTheWorkerListener(t *testing.T) {
 		t.Fatalf("Load() error = %v, want it to require workers.listen", err)
 	}
 }
+
+func TestLoadCleanupStaleScaleSets(t *testing.T) {
+	t.Run("defaults to on", func(t *testing.T) {
+		cfg, err := Load(writeWorkersConfig(t, "max_runners: 2\n"))
+		if err != nil {
+			t.Fatalf("Load() error: %v", err)
+		}
+		if !cfg.CleanupStaleScaleSets {
+			t.Fatal("cleanup_stale_scale_sets default = false, want true")
+		}
+	})
+	t.Run("file turns it off", func(t *testing.T) {
+		cfg, err := Load(writeWorkersConfig(t, "max_runners: 2\ncleanup_stale_scale_sets: false\n"))
+		if err != nil {
+			t.Fatalf("Load() error: %v", err)
+		}
+		if cfg.CleanupStaleScaleSets {
+			t.Fatal("cleanup_stale_scale_sets = true, want false from the file")
+		}
+	})
+	t.Run("env turns it off", func(t *testing.T) {
+		t.Setenv("GSO_CLEANUP_STALE_SCALE_SETS", "false")
+		cfg, err := Load(writeWorkersConfig(t, "max_runners: 2\n"))
+		if err != nil {
+			t.Fatalf("Load() error: %v", err)
+		}
+		if cfg.CleanupStaleScaleSets {
+			t.Fatal("cleanup_stale_scale_sets = true, want false from GSO_CLEANUP_STALE_SCALE_SETS")
+		}
+	})
+}

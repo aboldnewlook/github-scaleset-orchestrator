@@ -16,6 +16,22 @@ func (m *Model) Factory() ghapi.Factory {
 	}
 }
 
+// Deleter returns an in-process ghapi.DeleterFactory backed by the model.
+func (m *Model) Deleter() ghapi.DeleterFactory {
+	return func(_ context.Context, repo config.Repo) (ghapi.ScaleSetDeleter, error) {
+		return modelDeleter{m: m, repo: repo.Name}, nil
+	}
+}
+
+type modelDeleter struct {
+	m    *Model
+	repo string
+}
+
+func (d modelDeleter) DeleteRunnerScaleSet(_ context.Context, id int) error {
+	return d.m.DeleteScaleSet(d.repo, id)
+}
+
 // Client returns the in-process ghapi.Client of one repository.
 func (m *Model) Client(repo string) ghapi.Client { return &repoClient{m: m, repo: repo} }
 
@@ -96,4 +112,6 @@ func (s *localSession) AcquireJobs(_ context.Context, requestIDs []int64) ([]int
 
 func (s *localSession) Session() scaleset.RunnerScaleSetSession { return s.info }
 
-func (s *localSession) Close(context.Context) error { return s.m.closeSession(s.repo, s.info.SessionID) }
+func (s *localSession) Close(context.Context) error {
+	return s.m.closeSession(s.repo, s.info.SessionID)
+}

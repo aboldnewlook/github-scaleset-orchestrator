@@ -220,8 +220,8 @@ All three use the same address: the Docker bridge gateway (`172.17.0.1` on a def
 The scale-set names change when you upgrade (`gso-<hostname>-<repo>` becomes `gso-<instance>-<repo>-linux-x64`). Follow [migrations.md](migrations.md); in short:
 
 1. Stop the old `gso` container. Nothing is in flight once it stops.
-2. List and delete the old scale sets (`gso scaleset list --all --config <path>`, then `gso scaleset delete`), from any machine with the config and token, or from the new router container once it runs.
-3. Deploy this stack.
+2. Deploy this stack. Once the router has created its own scale set it deletes the old `gso-<hostname>-<repo>` scale sets by itself, but only when they have no jobs and no live listener; anything it skips is retried for about 30 minutes and reported in the router log and a `stale_scale_sets` alert.
+3. To opt out, set `cleanup_stale_scale_sets: false` in `config.yaml` or `GSO_CLEANUP_STALE_SCALE_SETS=false` on the router. To clean up by hand (a skipped set, or cleanup off), run `gso scaleset list --all --config <path>` and then `gso scaleset delete <id> --repo <repo>`, from any machine with the config and token, or from the router container. See [migrations.md](migrations.md#automatic-cleanup-of-old-scale-sets).
 
 Queued jobs wait for the few minutes this takes.
 

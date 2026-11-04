@@ -25,6 +25,7 @@ type Orchestrator struct {
 	bus      *event.Bus // may be nil
 	fleet    *fleet.Fleet
 	github   ghapi.Factory
+	deleter  ghapi.DeleterFactory // nil: no auto-cleanup of stale scale sets
 	timing   SupervisorTiming
 	instance string       // naming.InstanceID(cfg.Runner.InstanceID): scale-set names and session owner
 	class    runner.Class // P2a: the router host's class only
@@ -48,6 +49,13 @@ type Option func(*Orchestrator)
 // token or builds a real scaleset client itself.
 func WithGitHub(f ghapi.Factory) Option { return func(o *Orchestrator) { o.github = f } }
 
+// WithScaleSetDeleter sets how the router deletes orphaned scale sets. Without
+// one (an injected GitHub factory that brings none) auto-cleanup is
+// unavailable and orphans are only reported.
+func WithScaleSetDeleter(f ghapi.DeleterFactory) Option {
+	return func(o *Orchestrator) { o.deleter = f }
+}
+
 // WithSupervisorTiming replaces the listener supervisor's retry policy.
 // Zero durations fall back to the defaults, so a zero-value SupervisorTiming
 // cannot spin the retry loop.
@@ -62,6 +70,9 @@ func WithSupervisorTiming(t SupervisorTiming) Option {
 		}
 		if t.ConflictWait <= 0 {
 			t.ConflictWait = def.ConflictWait
+		}
+		if t.CleanupBackoff <= 0 {
+			t.CleanupBackoff = def.CleanupBackoff
 		}
 		o.timing = t
 	}
@@ -85,7 +96,11 @@ func New(cfg *config.Config, logger *slog.Logger, bus *event.Bus, opts ...Option
 		opt(o)
 	}
 	if o.github == nil {
-		o.github = ghapi.NewFactory(cfg, ghapi.NewHTTPClient(), logger)
+		hc := ghapi.NewHTTPClient()
+		o.github = ghapi.NewFactory(cfg, hc, logger)
+		if o.deleter == nil {
+			o.deleter = ghapi.NewDeleterFactory(cfg, hc, logger)
+		}
 	}
 	return o
 }

@@ -47,6 +47,10 @@ type Options struct {
 	// orchestrator takes it through orchestrator.WithGitHub and then never
 	// resolves a token or builds a real client. nil = real GitHub.
 	GitHub ghapi.Factory
+	// Deleter lets the orchestrator delete orphaned scale sets when GitHub is
+	// replaced. nil with GitHub set = no auto-cleanup; with real GitHub the
+	// orchestrator builds its own.
+	Deleter ghapi.DeleterFactory
 	// FleetTiming overrides fleet.DefaultTiming().
 	FleetTiming *fleet.Timing
 	// LocalExecutor replaces the local member's executor (tests: no runner
@@ -128,6 +132,9 @@ func New(cfg *config.Config, logger *slog.Logger, bus *event.Bus, o Options) (*R
 	oopts := []orchestrator.Option{orchestrator.WithFleet(r.fleet)}
 	if o.GitHub != nil {
 		oopts = append(oopts, orchestrator.WithGitHub(o.GitHub))
+	}
+	if o.Deleter != nil {
+		oopts = append(oopts, orchestrator.WithScaleSetDeleter(o.Deleter))
 	}
 	r.orch = orchestrator.New(cfg, logger, bus, oopts...)
 	r.runOrchestrator = r.orch.Run

@@ -94,6 +94,17 @@ func ScaleSetNameFor(instance, repo string, class runner.Class) string {
 	return fmt.Sprintf("%s-%s-%s-%s-%s", ScaleSetNamePrefix, inst, short, hash4, cls)
 }
 
+// HasClassSuffix reports whether name ends in "-<os>-<arch>" of a supported
+// class, the shape of every instance-era scale-set name (ScaleSetNameFor).
+func HasClassSuffix(name string) bool {
+	for _, c := range runner.AllClasses {
+		if strings.HasSuffix(name, "-"+c.String()) {
+			return true
+		}
+	}
+	return false
+}
+
 // ScaleSetPrefix is the prefix of every non-overflow scale-set name of an
 // instance. Overflow names truncate the instance to 10 characters.
 func ScaleSetPrefix(instance string) string {
